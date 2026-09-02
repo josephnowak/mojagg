@@ -1,0 +1,63 @@
+[build-system]
+requires = ["setuptools>=69", "wheel"]
+build-backend = "setuptools.build_meta"
+
+[project]
+name = "mojagg"
+version = "0.1.0"
+description = "NaN-aware aggregations, grouped reductions, and rolling windows — numbagg's API, Mojo's speed."
+readme = "README.md"
+license = "BSD-3-Clause"
+authors = [{ name = "mojagg contributors" }]
+keywords = ["numpy", "nan", "groupby", "rolling", "mojo", "simd", "numbagg"]
+requires-python = ">=3.11"
+dependencies = [
+    "numpy>=2.0",
+]
+
+[project.optional-dependencies]
+# Parity testing + benchmarking against the reference implementations.
+benchmark = [
+    "numbagg>=0.3",
+    "numpy-groupies>=0.11",
+    "pytest>=8",
+    "pytest-codspeed>=3",
+]
+test = [
+    "numbagg>=0.3",
+    "pytest>=8",
+]
+dev = [
+    "ruff>=0.8",
+    "pytest>=8",
+    "numbagg>=0.3",
+]
+
+[project.urls]
+Homepage = "https://github.com/josephnowak/mojagg"
+Repository = "https://github.com/josephnowak/mojagg"
+Issues = "https://github.com/josephnowak/mojagg/issues"
+
+[tool.setuptools]
+include-package-data = true
+
+[tool.setuptools.packages.find]
+where = ["python"]
+include = ["mojagg*"]
+
+# Native Mojo extension is built out-of-band by `pixi run build-ext` and
+# packaged as package data; see scripts/build_ext.py.
+
+[tool.ruff]
+target-version = "py311"
+line-length = 100
+src = ["python", "tests", "benchmarks", "scripts"]
+
+[tool.ruff.lint]
+select = ["E", "F", "I", "UP", "B", "SIM", "C4", "PTH"]
+
+[tool.pytest.ini_options]
+markers = [
+    "gpu: tests requiring a GPU device (skipped by default)",
+]
+addopts = "-m 'not gpu'"

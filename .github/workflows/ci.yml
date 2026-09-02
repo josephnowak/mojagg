@@ -1,0 +1,77 @@
+name: CI
+
+on:
+  push:
+    branches: [main]
+  pull_request:
+
+concurrency:
+  group: ci-${{ github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  lint:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: ruff (Python)
+        uses: astral-sh/ruff-action@v3
+        with:
+          args: "check --output-format=github"
+
+      - name: ruff format check
+        uses: astral-sh/ruff-action@v3
+        with:
+          args: "format --check"
+
+      - name: Set up pixi
+        uses: prefix-dev/setup-pixi@v0.8
+        with:
+          cache: true
+
+      - name: mojo format check
+        run: pixi run mojo format --check src/ tests/mojo/ || true   # enforce once sources land
+
+      - name: Mojo conventions lint
+        run: pixi run python scripts/lint_mojo.py
+
+  test-mojo:
+    runs-on: ubuntu-latest
+    needs: lint
+    steps:
+      - uses: actions/checkout@v4
+      - name: Set up pixi
+        uses: prefix-dev/setup-pixi@v0.8
+        with:
+          cache: true
+      - name: mojo test
+        run: pixi run test-mojo
+
+  test-python:
+    runs-on: ubuntu-latest
+    needs: lint
+    steps:
+      - uses: actions/checkout@v4
+      - name: Set up pixi
+        uses: prefix-dev/setup-pixi@v0.8
+        with:
+          cache: true
+      - name: Build extension
+        run: pixi run build-ext
+      - name: Parity tests vs numbagg (skip GPU)
+        run: pixi run pytest tests/python -m "not gpu" -q
+
+  wheel-size:
+    runs-on: ubuntu-latest
+    needs: [test-mojo, test-python]
+    steps:
+      - uses: actions/checkout@v4
+      - name: Set up pixi
+        uses: prefix-dev/setup-pixi@v0.8
+        with:
+          cache: true
+      - name: Build wheel
+        run: pixi run build-wheel
+      - name: Check wheel size budget
+        run: python scripts/check_wheel_size.py --max-mb 20 dist/*.whl

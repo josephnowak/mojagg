@@ -1,0 +1,27 @@
+name: CodSpeed
+
+on:
+  push:
+    branches: [main]
+  pull_request:
+
+jobs:
+  benchmarks:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Set up pixi
+        uses: prefix-dev/setup-pixi@v0.8
+        with:
+          cache: true
+
+      - name: Build extension
+        run: pixi run build-ext
+
+      - name: Run benchmarks
+        uses: CodSpeedHQ/action@v3
+        with:
+          token: ${{ secrets.CODSPEED_TOKEN }}
+          # Benchmarks are pytest tests in benchmarks/ (CPU instrument).
+          run: pixi run pytest benchmarks/ --codspeed -q

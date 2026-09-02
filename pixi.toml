@@ -1,0 +1,34 @@
+[workspace]
+channels = ["https://conda.modular.com/max", "conda-forge"]
+name = "mojagg"
+# linux-64 is the primary dev/CI target; osx-arm64 and win-64 added as the
+# Mojo toolchain support lands (Mojo has no native Windows target yet).
+platforms = ["linux-64"]
+version = "0.1.0"
+
+[tasks]
+# Build the native Mojo extension into python/mojagg/_native
+build-ext = "python scripts/build_ext.py"
+# Build a platform wheel into dist/
+build-wheel = "python scripts/build_ext.py --wheel"
+# Mojo unit tests
+test-mojo = "mojo test -I src/ tests/mojo/"
+# Python parity tests (numbagg comparison)
+test = "pytest tests/python -q"
+# Lint: ruff (py) + mojo format check + kernel conventions
+lint = "python scripts/lint.py"
+format = { cmd = "ruff format python tests benchmarks scripts && ruff check --fix python tests benchmarks scripts && mojo format src/ tests/mojo/" }
+bench-quick = "pytest benchmarks -q --benchmark-quick"
+
+[dependencies]
+mojo = ">=1.0.0,<2"
+max = ">=26.5.0,<27"
+python = ">=3.11"
+pip = ">=25"
+setuptools = ">=69"
+wheel = ">=0.45"
+pytest = ">=8"
+numpy = ">=2.0"
+numbagg = ">=0.3"      # parity-testing reference
+ruff = ">=0.8"
+auditwheel = ">=6"     # manylinux wheel repair

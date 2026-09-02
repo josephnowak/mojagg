@@ -1,0 +1,35 @@
+# Python
+__pycache__/
+*.py[cod]
+*.egg-info/
+.eggs/
+dist/
+build/
+.venv/
+.pytest_cache/
+.ruff_cache/
+*.so
+*.pyd
+
+# Mojo / MAX
+.mojopkg
+*.mojopkg
+.benchmark/
+
+# pixi / uv
+.pixi/
+pixi.lock
+uv.lock
+
+# IDEs
+.idea/
+.vscode/
+
+# OS
+.DS_Store
+Thumbs.db
+
+# Benchmark artifacts
+benchmarks/results/*.csv
+benchmarks/results/*.json
+!benchmarks/results/.gitkeep

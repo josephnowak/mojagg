@@ -1,0 +1,97 @@
+name: Mojo toolchain watch
+
+# Mojo is a language under active development. This workflow checks for new
+# Mojo/MAX releases and opens an issue when one lands, so we can review
+# language changes, deprecated patterns, and new stdlib/algorithm APIs that
+# could improve mojagg's kernels.
+
+on:
+  schedule:
+    - cron: "0 8 * * 1"   # Mondays 08:00 UTC
+  workflow_dispatch: {}
+
+permissions:
+  issues: write
+
+jobs:
+  check:
+    runs-on: ubuntu-latest
+    steps:
+      - name: Check latest Modular release
+        id: check
+        uses: actions/github-script@v7
+        with:
+          script: |
+            // Latest Modular MAX release (carries the Mojo toolchain).
+            const rel = await github.rest.repos.getLatestRelease({
+              owner: "modular",
+              repo: "max",
+            });
+            const latest = rel.data.tag_name;
+            core.setOutput("latest", latest);
+            core.setOutput("url", rel.data.html_url);
+            core.setOutput("body", rel.data.body || "(no notes)");
+
+            // Compare with the version pinned in pixi.toml
+            const fs = require("fs");
+            const pixi = fs.readFileSync("pixi.toml", "utf8");
+            const m = pixi.match(/max\s*=\s*">=?\s*([0-9.]+)/);
+            const pinned = m ? m[1] : "unknown";
+            core.setOutput("pinned", pinned);
+
+            // Extract numeric version from tag like v26.6.0 or max-26.6.0
+            const lm = latest.match(/([0-9]+\.[0-9]+(\.[0-9]+)?)/);
+            const latestVer = lm ? lm[1] : latest;
+            core.setOutput("latestVer", latestVer);
+            core.setOutput("changed", pinned !== latestVer ? "true" : "false");
+
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Resolve versions
+        id: v
+        run: |
+          echo "pinned=${{ steps.check.outputs.pinned }}"
+          echo "latest=${{ steps.check.outputs.latestVer }}"
+
+      - name: Open issue on new release
+        if: steps.check.outputs.changed == 'true'
+        uses: actions/github-script@v7
+        with:
+          script: |
+            const latest = "${{ steps.check.outputs.latestVer }}";
+            const pinned = "${{ steps.check.outputs.pinned }}";
+            const title = `Mojo/MAX ${latest} released (repo pins ${pinned})`;
+
+            // Skip if an open issue already exists for this version
+            const existing = await github.rest.issues.listForRepo({
+              owner: context.repo.owner,
+              repo: context.repo.repo,
+              state: "open",
+              labels: "mojo-upgrade",
+              per_page: 100,
+            });
+            if (existing.data.some(i => i.title.includes(latest))) {
+              core.info("Issue already open for " + latest);
+              return;
+            }
+
+            await github.rest.issues.create({
+              owner: context.repo.owner,
+              repo: context.repo.repo,
+              title,
+              labels: ["mojo-upgrade", "dependencies"],
+              body: [
+                `A new Modular MAX/Mojo release is out: **${latest}** (repo pins \`${pinned}\`).`,
+                ``,
+                `Release notes: ${{ steps.check.outputs.url }}`,
+                ``,
+                `Review checklist:`,
+                `- [ ] Read changelog for language/stdlib breaking changes`,
+                `- [ ] Grep codebase for deprecated APIs flagged in notes`,
+                `- [ ] Check for new \`algorithm\`/\`stdlib\` primitives that could improve kernels (SIMD, parallelize, reductions)`,
+                `- [ ] Bump \`max\`/\`mojo\` in pixi.toml and pyproject.toml`,
+                `- [ ] Run full test + benchmark suite; compare vs baseline`,
+                `- [ ] Update AGENTS.md / SKILL.md if patterns changed`,
+              ].join("\n"),
+            });

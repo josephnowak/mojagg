@@ -1,0 +1,122 @@
+name: Release
+
+# Publishing happens ONLY here — never on merge to main.
+# Trigger: Actions tab → "Release" → Run workflow → type the version.
+# One-time setup required: PyPI Trusted Publisher (see RELEASING.md).
+
+on:
+  workflow_dispatch:
+    inputs:
+      version:
+        description: "Release version, e.g. 0.2.0 (no leading v)"
+        required: true
+        type: string
+
+permissions:
+  contents: write      # create tag + GitHub Release
+  id-token: write      # PyPI trusted publishing (OIDC)
+
+jobs:
+  prepare:
+    runs-on: ubuntu-latest
+    outputs:
+      version: ${{ steps.v.outputs.version }}
+    steps:
+      - uses: actions/checkout@v4
+      - name: Validate and bump version
+        id: v
+        run: |
+          set -euo pipefail
+          V="${{ inputs.version }}"
+          echo "version=$V" >> "$GITHUB_OUTPUT"
+          # semver-ish guard
+          echo "$V" | grep -Eq '^[0-9]+\.[0-9]+\.[0-9]+([.-][a-zA-Z0-9]+)?$' \
+            || { echo "bad version: $V"; exit 1; }
+          # refuse to re-tag an existing release
+          if git ls-remote --tags origin "refs/tags/v$V" | grep -q .; then
+            echo "tag v$V already exists"; exit 1
+          fi
+          # bump version in pyproject.toml
+          sed -i -E "s/^version = \".*\"/version = \"$V\"/" pyproject.toml
+          grep -q "^version = \"$V\"" pyproject.toml
+      - name: Commit and tag
+        run: |
+          git config user.name "github-actions[bot]"
+          git config user.email "github-actions[bot]@users.noreply.github.com"
+          git add pyproject.toml
+          git commit -m "release: v${{ steps.v.outputs.version }}"
+          git tag -a "v${{ steps.v.outputs.version }}" -m "v${{ steps.v.outputs.version }}"
+          git push origin HEAD:main --tags
+
+  build:
+    needs: prepare
+    strategy:
+      matrix:
+        include:
+          - { os: ubuntu-latest, plat: manylinux_x86_64 }
+          - { os: macos-latest,  plat: macosx_arm64 }
+    runs-on: ${{ matrix.os }}
+    steps:
+      - uses: actions/checkout@v4
+        with: { ref: "v${{ needs.prepare.outputs.version }}" }
+
+      - name: Set up pixi
+        uses: prefix-dev/setup-pixi@v0.8
+
+      - name: Build wheel
+        run: pixi run build-wheel
+
+      - name: Repair linux wheel
+        if: matrix.plat == 'manylinux_x86_64'
+        run: pixi run auditwheel repair dist/*.whl -w dist/repaired
+
+      - name: Smoke-test the built wheel
+        run: |
+          WHEEL=$(ls dist/repaired/*.whl 2>/dev/null || ls dist/*.whl)
+          pixi run python -m pip install --force-reinstall "$WHEEL"
+          pixi run python -c "import mojagg, numpy as np; a=np.arange(10,dtype=np.float64); a[3]=np.nan; print('smoke:', mojagg.nansum(a))"
+
+      - uses: actions/upload-artifact@v4
+        with:
+          name: wheel-${{ matrix.plat }}
+          path: |
+            dist/*.whl
+            dist/repaired/*.whl
+
+  sdist:
+    needs: prepare
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+        with: { ref: "v${{ needs.prepare.outputs.version }}" }
+      - name: Build sdist
+        run: |
+          python -m pip install build
+          python -m build --sdist
+      - uses: actions/upload-artifact@v4
+        with: { name: sdist, path: dist/*.tar.gz }
+
+  publish:
+    needs: [build, sdist]
+    runs-on: ubuntu-latest
+    environment: pypi
+    steps:
+      - uses: actions/download-artifact@v4
+        with: { pattern: "*", path: dist, merge-multiple: true }
+
+      - name: Publish to TestPyPI
+        uses: pypa/gh-action-pypi-publish@release/v1
+        with:
+          repository-url: https://test.pypi.org/legacy/
+          skip-existing: true
+
+      - name: Publish to PyPI
+        uses: pypa/gh-action-pypi-publish@release/v1
+
+      - name: Create GitHub Release
+        uses: softprops/action-gh-release@v2
+        with:
+          tag_name: v${{ needs.prepare.outputs.version }}
+          name: v${{ needs.prepare.outputs.version }}
+          files: dist/*
+          generate_release_notes: true
