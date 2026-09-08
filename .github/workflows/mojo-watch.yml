@@ -19,7 +19,7 @@ jobs:
     steps:
       - name: Check latest Modular release
         id: check
-        uses: actions/github-script@v7
+        uses: actions/github-script@v9
         with:
           script: |
             // Latest Modular MAX release (carries the Mojo toolchain).
@@ -46,7 +46,7 @@ jobs:
             core.setOutput("changed", pinned !== latestVer ? "true" : "false");
 
       - name: Checkout
-        uses: actions/checkout@v4
+        uses: actions/checkout@v7
 
       - name: Resolve versions
         id: v
@@ -56,7 +56,7 @@ jobs:
 
       - name: Open issue on new release
         if: steps.check.outputs.changed == 'true'
-        uses: actions/github-script@v7
+        uses: actions/github-script@v9
         with:
           script: |
             const latest = "${{ steps.check.outputs.latestVer }}";
