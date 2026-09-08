@@ -1,19 +1,21 @@
 name: Release
 
-# Publishing happens ONLY here — never on merge to main.
-# Trigger: Actions tab → "Release" → Run workflow → type the version.
-# One-time setup required: PyPI Trusted Publisher (see RELEASING.md).
+# Publishing triggers automatically when a GitHub Release is published,
+# or manually via Actions tab -> "Release" -> Run workflow.
+# Requires PyPI Trusted Publisher configured on pypi.org for environment 'pypi'.
 
 on:
+  release:
+    types: [published]
   workflow_dispatch:
     inputs:
       version:
-        description: "Release version, e.g. 0.2.0 (no leading v)"
+        description: "Release version, e.g. 0.1.0 (no leading v)"
         required: true
         type: string
 
 permissions:
-  contents: write      # create tag + GitHub Release
+  contents: write      # create/update GitHub Release
   id-token: write      # PyPI trusted publishing (OIDC)
 
 jobs:
@@ -23,52 +25,60 @@ jobs:
       version: ${{ steps.v.outputs.version }}
     steps:
       - uses: actions/checkout@v4
-      - name: Validate and bump version
+      - name: Determine version
         id: v
         run: |
           set -euo pipefail
-          V="${{ inputs.version }}"
+          if [ "${{ github.event_name }}" = "release" ]; then
+            TAG="${{ github.event.release.tag_name }}"
+            V="${TAG#v}"
+          else
+            V="${{ inputs.version }}"
+          fi
           echo "version=$V" >> "$GITHUB_OUTPUT"
           # semver-ish guard
           echo "$V" | grep -Eq '^[0-9]+\.[0-9]+\.[0-9]+([.-][a-zA-Z0-9]+)?$' \
             || { echo "bad version: $V"; exit 1; }
-          # refuse to re-tag an existing release
+
+      - name: Validate and tag for workflow_dispatch
+        if: github.event_name == 'workflow_dispatch'
+        run: |
+          V="${{ steps.v.outputs.version }}"
           if git ls-remote --tags origin "refs/tags/v$V" | grep -q .; then
             echo "tag v$V already exists"; exit 1
           fi
-          # bump version in pyproject.toml
           sed -i -E "s/^version = \".*\"/version = \"$V\"/" pyproject.toml
-          grep -q "^version = \"$V\"" pyproject.toml
-      - name: Commit and tag
-        run: |
           git config user.name "github-actions[bot]"
           git config user.email "github-actions[bot]@users.noreply.github.com"
           git add pyproject.toml
-          git commit -m "release: v${{ steps.v.outputs.version }}"
-          git tag -a "v${{ steps.v.outputs.version }}" -m "v${{ steps.v.outputs.version }}"
+          git commit -m "release: v$V"
+          git tag -a "v$V" -m "v$V"
           git push origin HEAD:main --tags
 
   build:
     needs: prepare
-    strategy:
-      matrix:
-        include:
-          - { os: ubuntu-latest, plat: manylinux_x86_64 }
-          - { os: macos-latest,  plat: macosx_arm64 }
-    runs-on: ${{ matrix.os }}
+    runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@v4
-        with: { ref: "v${{ needs.prepare.outputs.version }}" }
+        with:
+          ref: ${{ github.event_name == 'release' && github.event.release.tag_name || format('v{0}', needs.prepare.outputs.version) }}
+
+      - name: Sync pyproject version
+        run: |
+          sed -i -E "s/^version = \".*\"/version = \"${{ needs.prepare.outputs.version }}\"/" pyproject.toml
 
       - name: Set up pixi
         uses: prefix-dev/setup-pixi@v0.8.1
+        with:
+          cache: true
 
       - name: Build wheel
         run: pixi run build-wheel
 
       - name: Repair linux wheel
-        if: matrix.plat == 'manylinux_x86_64'
-        run: pixi run auditwheel repair dist/*.whl -w dist/repaired
+        run: |
+          mkdir -p dist/repaired
+          pixi run auditwheel repair dist/*.whl -w dist/repaired
 
       - name: Smoke-test the built wheel
         run: |
@@ -78,42 +88,58 @@ jobs:
 
       - uses: actions/upload-artifact@v4
         with:
-          name: wheel-${{ matrix.plat }}
-          path: |
-            dist/*.whl
-            dist/repaired/*.whl
+          name: wheels
+          path: dist/repaired/*.whl
 
   sdist:
     needs: prepare
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@v4
-        with: { ref: "v${{ needs.prepare.outputs.version }}" }
+        with:
+          ref: ${{ github.event_name == 'release' && github.event.release.tag_name || format('v{0}', needs.prepare.outputs.version) }}
+
+      - name: Sync pyproject version
+        run: |
+          sed -i -E "s/^version = \".*\"/version = \"${{ needs.prepare.outputs.version }}\"/" pyproject.toml
+
+      - name: Set up pixi
+        uses: prefix-dev/setup-pixi@v0.8.1
+        with:
+          cache: true
+
       - name: Build sdist
         run: |
-          python -m pip install build
-          python -m build --sdist
+          pixi run python -m pip install build
+          pixi run python -m build --sdist
+
       - uses: actions/upload-artifact@v4
-        with: { name: sdist, path: dist/*.tar.gz }
+        with:
+          name: sdist
+          path: dist/*.tar.gz
 
   publish:
-    needs: [build, sdist]
+    needs: [build, sdist, prepare]
     runs-on: ubuntu-latest
     environment: pypi
     steps:
       - uses: actions/download-artifact@v4
-        with: { pattern: "*", path: dist, merge-multiple: true }
-
-      - name: Publish to TestPyPI
-        uses: pypa/gh-action-pypi-publish@release/v1
         with:
-          repository-url: https://test.pypi.org/legacy/
-          skip-existing: true
+          pattern: "*"
+          path: dist
+          merge-multiple: true
 
       - name: Publish to PyPI
         uses: pypa/gh-action-pypi-publish@release/v1
 
+      - name: Update GitHub Release Assets
+        if: github.event_name == 'release'
+        uses: softprops/action-gh-release@v2
+        with:
+          files: dist/*
+
       - name: Create GitHub Release
+        if: github.event_name == 'workflow_dispatch'
         uses: softprops/action-gh-release@v2
         with:
           tag_name: v${{ needs.prepare.outputs.version }}

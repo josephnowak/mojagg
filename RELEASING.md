@@ -23,18 +23,31 @@ That's it — no `PYPI_API_TOKEN` secret anywhere. The workflow exchanges a shor
 2. Copy the repo's CodSpeed token into **Settings → Secrets → Actions → `CODSPEED_TOKEN`**.
 3. Free for public/open-source repos.
 
-## Cutting a release (the button)
+## Cutting a release
 
-1. Make sure `main` is green (CI + CodSpeed) and CHANGELOG-worthy changes use conventional commits.
-2. Go to **Actions → Release → Run workflow**.
-3. Type the version (e.g. `0.2.0`) → **Run**.
+You can cut a release in either of two ways:
+
+### Option A: Create a GitHub Release (Recommended)
+1. In the GitHub repository, go to **Releases** → **Draft a new release**.
+2. Click **Choose a tag**:
+   - Type the version tag, e.g. `v0.1.0`.
+   - Select **Create new tag: v0.1.0 on publish**.
+   - Target: `main`.
+3. Fill in the release title (e.g. `v0.1.0`) and click **Generate release notes**.
+4. Click **Publish release**.
+
+The `release.yml` workflow will automatically trigger, build the wheels and sdist, test them, publish to PyPI, and attach the assets to the GitHub Release.
+
+### Option B: The "Run workflow" button
+1. Go to **Actions → Release → Run workflow**.
+2. Type the version without leading `v` (e.g. `0.1.0`) → **Run**.
 
 The workflow will:
 - validate the version and refuse if the tag exists,
 - bump `pyproject.toml`, commit, and tag `v<version>`,
-- build wheels for each platform (linux x86_64, macOS arm64) + sdist,
-- smoke-test the built wheel on its own platform,
-- publish to **TestPyPI**, then **PyPI** via trusted publishing,
+- build wheel (`manylinux_x86_64`) + sdist,
+- smoke-test the built wheel,
+- publish to **PyPI** via trusted publishing,
 - create a GitHub Release with the wheels attached and auto-generated notes.
 
 ## Versioning
