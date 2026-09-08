@@ -18,7 +18,6 @@ build/
 
 # pixi / uv
 .pixi/
-pixi.lock
 uv.lock
 
 # IDEs

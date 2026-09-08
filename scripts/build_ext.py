@@ -10,6 +10,8 @@ Usage:
 
 from __future__ import annotations
 
+import os
+import platform
 import shutil
 import subprocess
 import sys
@@ -27,6 +29,36 @@ EXT_SUFFIX = sysconfig.get_config_var("EXT_SUFFIX") or ".so"
 BINDINGS = ["nanfuncs_native"]
 
 
+def get_target_mcpu() -> str | None:
+    """Determine the compilation target CPU microarchitecture.
+
+    Similar to NumPy's baseline strategy:
+    - x86_64: defaults to 'x86-64-v3' (AVX2, FMA3, BMI1, BMI2 - Haswell/Zen and newer, 2013+),
+      dropping legacy pre-AVX2 hardware while maximizing modern SIMD performance.
+    - aarch64/arm64: defaults to standard ARMv8-A baseline.
+    Can be overridden via MOJAGG_TARGET_CPU env var or --mcpu command line option.
+    """
+    env_target = os.environ.get("MOJAGG_TARGET_CPU")
+    if env_target:
+        return env_target
+
+    machine = platform.machine().lower()
+    if machine in ("x86_64", "amd64"):
+        return "x86-64-v3"
+    if machine in ("aarch64", "arm64"):
+        return "generic"
+    return None
+
+
+def parse_mcpu_arg() -> str | None:
+    for i, arg in enumerate(sys.argv):
+        if arg == "--mcpu" and i + 1 < len(sys.argv):
+            return sys.argv[i + 1]
+        if arg.startswith("--mcpu="):
+            return arg.split("=", 1)[1]
+    return None
+
+
 def mojo() -> str:
     exe = shutil.which("mojo")
     if exe:
@@ -38,7 +70,7 @@ def mojo() -> str:
     raise SystemExit("mojo toolchain not found on PATH; run inside pixi env")
 
 
-def build_binding(name: str, mojo_exe: str) -> Path:
+def build_binding(name: str, mojo_exe: str, mcpu: str | None = None) -> Path:
     src = BINDINGS_DIR / f"{name}.mojo"
     out = OUT_DIR / f"{name}{EXT_SUFFIX}"
     cmd = [
@@ -49,10 +81,16 @@ def build_binding(name: str, mojo_exe: str) -> Path:
         "-I",
         str(SRC),
         "-O3",
-        "-o",
-        str(out),
-        str(src),
     ]
+    if mcpu:
+        cmd.extend(["--mcpu", mcpu])
+    cmd.extend(
+        [
+            "-o",
+            str(out),
+            str(src),
+        ]
+    )
     print("build:", " ".join(cmd), flush=True)
     subprocess.run(cmd, cwd=ROOT, check=True)
     return out
@@ -60,13 +98,27 @@ def build_binding(name: str, mojo_exe: str) -> Path:
 
 def main() -> int:
     wheel = "--wheel" in sys.argv
+    mcpu = parse_mcpu_arg() or get_target_mcpu()
     exe = mojo()
     OUT_DIR.mkdir(parents=True, exist_ok=True)
     for name in BINDINGS:
-        out = build_binding(name, exe)
+        out = build_binding(name, exe, mcpu=mcpu)
         print("built:", out)
     if wheel:
-        print("(wheel packaging not yet implemented)")
+        dist_dir = ROOT / "dist"
+        dist_dir.mkdir(parents=True, exist_ok=True)
+        wheel_cmd = [
+            sys.executable,
+            "-m",
+            "pip",
+            "wheel",
+            "--no-deps",
+            "-w",
+            str(dist_dir),
+            str(ROOT),
+        ]
+        print("package wheel:", " ".join(wheel_cmd), flush=True)
+        subprocess.run(wheel_cmd, cwd=ROOT, check=True)
     return 0
 
 

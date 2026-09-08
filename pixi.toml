@@ -35,3 +35,4 @@ numbagg = ">=0.3"      # parity-testing reference
 bottleneck = ">=1.4"
 ruff = ">=0.8"
 auditwheel = ">=6"     # manylinux wheel repair
+patchelf = ">=0.19.1,<0.20"

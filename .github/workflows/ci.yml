@@ -26,7 +26,7 @@ jobs:
           args: "format --check"
 
       - name: Set up pixi
-        uses: prefix-dev/setup-pixi@v0.8
+        uses: prefix-dev/setup-pixi@v0.8.1
         with:
           cache: true
 
@@ -42,7 +42,7 @@ jobs:
     steps:
       - uses: actions/checkout@v4
       - name: Set up pixi
-        uses: prefix-dev/setup-pixi@v0.8
+        uses: prefix-dev/setup-pixi@v0.8.1
         with:
           cache: true
       - name: mojo test
@@ -54,13 +54,13 @@ jobs:
     steps:
       - uses: actions/checkout@v4
       - name: Set up pixi
-        uses: prefix-dev/setup-pixi@v0.8
+        uses: prefix-dev/setup-pixi@v0.8.1
         with:
           cache: true
       - name: Build extension
         run: pixi run build-ext
       - name: Parity tests vs numbagg (skip GPU)
-        run: pixi run pytest tests/python -m "not gpu" -q
+        run: pixi run test
 
   wheel-size:
     runs-on: ubuntu-latest
@@ -68,7 +68,7 @@ jobs:
     steps:
       - uses: actions/checkout@v4
       - name: Set up pixi
-        uses: prefix-dev/setup-pixi@v0.8
+        uses: prefix-dev/setup-pixi@v0.8.1
         with:
           cache: true
       - name: Build wheel
