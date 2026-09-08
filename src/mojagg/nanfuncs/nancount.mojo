@@ -1,29 +1,31 @@
-"""NaN-skipping sum: math hooks over shared contiguous/strided scanners.
+"""NaN-skipping count: element counting over shared contiguous/strided scanners.
 
-Preserves the measured wide-accumulator/EVL layout (2026-09-04 probes
-bench_wide_acc_evl and bench_evl_branch_cost): eight native-width FADD
-chains, one horizontal reduction per run, compile-time lane updates for
-the tail. Strided scans retain a scalar sum, without dynamic lane indexing.
-Integer specializations erase NaN handling. Empty/all-NaN sums are zero.
+Parity semantics (numbagg.nancount / count): count non-NaN elements over the
+reduced slice. Output is ALWAYS Int64. Integer dtypes have no NaN, so every
+element is non-NaN (returns slice length in O(1) via LENGTH_ONLY).
+
+Floating point uses SIMD vector accumulators with masked NaN handling.
 """
 
 from std.math import isnan
 
 from mojagg.core.reduce1d import NaNReduction1D, ReductionWidth
 
-comptime FADD_CHAINS_TARGET = 8
-"""Existing benchmarked chain count; not a universal target heuristic."""
 
-
-struct NanSum[dtype: DType](NaNReduction1D):
+struct NanCount[
+    dtype: DType,
+    chains: Int = 4 if dtype == DType.float64 else 1,
+](NaNReduction1D):
     comptime value_dtype = Self.dtype
-    comptime out_dtype = Self.dtype
-    comptime State = Scalar[Self.dtype]
+    comptime out_dtype = DType.int64
+    comptime State = Scalar[DType.int64]
     comptime Out = Self.State
-    comptime block_lanes = ReductionWidth[
-        Self.dtype, FADD_CHAINS_TARGET
-    ].block_lanes
-    comptime Acc = SIMD[Self.dtype, Self.block_lanes]
+    comptime block_lanes = ReductionWidth[Self.dtype, Self.chains].block_lanes
+    comptime Acc = SIMD[DType.int64, Self.block_lanes]
+    comptime SHORT_CIRCUIT = False
+
+    def __init__(out self):
+        pass
 
     @staticmethod
     def identity() -> Self.State:
@@ -38,16 +40,20 @@ struct NanSum[dtype: DType](NaNReduction1D):
         comptime if Self.dtype.is_floating_point():
             if isnan(value):
                 return state
-        return state + value
+        return state + 1
 
     @staticmethod
     def step_simd(
         mut acc: Self.Acc, values: SIMD[Self.dtype, Self.block_lanes]
     ):
         comptime if Self.dtype.is_floating_point():
-            acc += isnan(values).select(Self.Acc(0), values)
+            var missing = isnan(values)
+            acc += missing.select(
+                SIMD[DType.int64, Self.block_lanes](0),
+                SIMD[DType.int64, Self.block_lanes](1),
+            )
         else:
-            acc += values
+            acc += SIMD[DType.int64, Self.block_lanes](1)
 
     @staticmethod
     def step_tail[lane: Int](mut acc: Self.Acc, value: Scalar[Self.dtype]):
@@ -60,9 +66,6 @@ struct NanSum[dtype: DType](NaNReduction1D):
     @staticmethod
     def combine(acc: Self.State, partial: Self.State) -> Self.State:
         return acc + partial
-
-    def __init__(out self):
-        pass
 
     def finalize(self, state: Self.State) -> Self.Out:
         return state

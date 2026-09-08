@@ -33,3 +33,9 @@ Thumbs.db
 benchmarks/results/*.csv
 benchmarks/results/*.json
 !benchmarks/results/.gitkeep
+
+# Local clones & workspace scratch
+.analysis/
+mojo-plugin-jetbrains/
+numbagg_upstream/
+

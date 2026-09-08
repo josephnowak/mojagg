@@ -16,6 +16,7 @@ mojagg replicates [numbagg](https://github.com/numbagg/numbagg) 1:1 (API + seman
 | Lint everything | `pixi run lint` (ruff + mojo format --check + scripts/lint_mojo.py) |
 | Format | `pixi run format` |
 | Quick bench | `pixi run bench-quick` |
+| Numbagg reference matrix | `pixi run bench-reference` (`--full` for 1M-element cases) |
 | Full bench matrix | `python benchmarks/full_matrix.py` |
 
 ## Repo layout
@@ -43,10 +44,16 @@ scripts/               lint_mojo.py, release helpers
 
 - Parity = `np.testing.assert_allclose` against numbagg (equal-NaN) across: empty, all-NaN, min_count/ddof boundaries, negative labels, axis None/int/tuple, f32+f64.
 - `tests/python/` is the executable spec of "100% numbagg compatibility".
+- Reuse pinned tests/fixtures cloned from numbagg's GitHub repository, with
+  source revision and license preserved. Compare results, shapes, dtypes and
+  exception types directly against numbagg, not only NumPy. Benchmark the same
+  inputs against numbagg too; clearly label operations without a numbagg equivalent.
 - GPU-marked tests: `pytest -m gpu`, skipped without hardware.
 
 ## Conventions
 
 - Public function names match numbagg exactly (`group_nansum`, `move_exp_nanvar`...). One op = one Mojo file.
+- Internal APIs may change incompatibly. Prefer one current driver contract
+  over compatibility overloads; public numerical semantics must still match numbagg.
 - ruff for Python; `mojo format` for Mojo; `scripts/lint_mojo.py` enforces kernel conventions (naming, no prints, no allocs in hot loops).
 - Conventional commits (`feat:`, `fix:`, `perf:`, ...) — the changelog is generated from them.

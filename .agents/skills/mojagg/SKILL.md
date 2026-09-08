@@ -17,7 +17,7 @@ Dtype matrix (the ONLY supported combinations — enforced, never widened/copied
 
 ## 1. Architecture: five drivers, all kernels pure 1-D
 
-Numbagg's decorators map to five Mojo gufunc-drivers in `src/mojagg/drivers/`. A kernel NEVER knows about ndim/axis/Python; drivers handle that once.
+Numbagg's decorators map to five Mojo gufunc-drivers in `../../../src/mojagg/drivers`. A kernel NEVER knows about ndim/axis/Python; drivers handle that once.
 
 | numbagg decorator | mojagg driver | gufunc shape | used by |
 |---|---|---|---|
@@ -36,21 +36,14 @@ Axis rules (replicate exactly):
 
 ## 2. Function catalog & parity semantics (the spec)
 
-### nanfuncs (`src/mojagg/nanfuncs/`, driver `reduce_axis`)
+### nanfuncs (`../../../src/mojagg/nanfuncs`, driver `reduce_axis`)
 `nansum nanmean nanmin nanmax nanstd nanvar nancount nanargmin nanargmax nanmedian nanquantile allnan anynan count`
-- `nanmean`: merge float64 sum + int64 count, divide once per output slice;
-  zero count -> NaN. Float32 inputs also use a float64 accumulator, matching
-  numbagg's running-sum precision (including finite float32 overflow cases);
-  result dtype stays float32. This is an explicit internal-accumulator exception
-  to the no-widening rule, not an input copy. Reference gufunc promotions:
-  bool/int8/uint8/int16/uint16/float16 -> float32; int32/uint32/int64/uint64 ->
-  float64, performed visibly in the facade. Unsupported nonnumeric types raise.
 - `nanstd/nanvar` take `ddof=1`; denominators `count - ddof <= 0` → NaN.
 - `allnan/anynan/count` accept bool+int+float.
 - `nanquantile/nanmedian` are NOT streaming: selection-based; treat as special case (sort/introselect per slice).
 - All-NaN slice → NaN (numbagg warns; mojagg returns NaN silently).
 
-### groupby (`src/mojagg/groupby/`, driver `group_reduce`)
+### groupby (`../../../src/mojagg/groupby`, driver `group_reduce`)
 `group_nansum group_nanmean group_nanprod group_nancount group_nanmin group_nanmax group_nanargmin group_nanargmax group_nanfirst group_nanlast group_nanany group_nanall group_nanvar group_nanstd group_nansum_of_squares`
 - **Labels < 0 are SKIPPED, never an error.**
 - NaN values are skipped per-op as in numbagg's grouped.py.
@@ -61,7 +54,7 @@ Axis rules (replicate exactly):
 - `group_nanany/all`: write 0/1 into out; treat NaN as missing.
 - int values are PROMOTED to f64 by the facade for ops numbagg marks `supports_ints=False` (nanmean/nanvar/nanstd). Do this visibly in Python, never hidden in kernels.
 
-### rolling (`src/mojagg/rolling/`, driver `rolling_axis`)
+### rolling (`../../../src/mojagg/rolling`, driver `rolling_axis`)
 `move_sum move_mean move_std move_var move_cov move_corr`
 - Single-pass running accumulator; O(n), NOT O(n·window).
 - `min_count`: mean/sum use `max(min_count,1)`; var/std `max(...,2)`; out is NaN until `count >= min_count`.
@@ -125,7 +118,4 @@ Axis rules (replicate exactly):
 
 ## 6. What NOT to do
 
-- No dtype widening/casting inside kernels except the documented nanmean
-  accumulator precision above. No negative-label errors (skip). No hidden
-  allocations. No reading env/globals in kernels. No GPU code paths until `gpu/`
-  lands — keep `Backend` an enum with only `CPU` active.
+- No dtype widening/casting inside kernels. No negative-label errors (skip). No hidden allocations. No reading env/globals in kernels. No GPU code paths until `gpu/` lands — keep `Backend` an enum with only `CPU` active.

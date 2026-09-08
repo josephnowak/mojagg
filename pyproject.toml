@@ -52,11 +52,13 @@ include = ["mojagg*"]
 target-version = "py311"
 line-length = 100
 src = ["python", "tests", "benchmarks", "scripts"]
+extend-exclude = ["tests/vendor", ".analysis"]
 
 [tool.ruff.lint]
 select = ["E", "F", "I", "UP", "B", "SIM", "C4", "PTH"]
 
 [tool.pytest.ini_options]
+pythonpath = ["python", "."]
 markers = [
     "gpu: tests requiring a GPU device (skipped by default)",
 ]

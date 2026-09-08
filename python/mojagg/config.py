@@ -37,12 +37,17 @@ _ENV_VARS = {
 class MojaggConfig:
     """Resolved dispatch configuration. Passed by value into native calls."""
 
-    backend: str = "auto"           # "auto" | "cpu" | "gpu"
-    threads: int = 0                # 0 = physical cores
-    parallel_threshold: int = 500_000
+    backend: str = "auto"  # "auto" | "cpu" | "gpu"
+    threads: int = 0  # 0 = physical cores
+    # Parallel kicks in at outer_count x slice_len >= this many elements.
+    # Derived (2026-09, WSL2, 16 cores): max.algorithm.parallelize has ~0.5 ms
+    # fixed dispatch cost per FFI call there, so sub-ms work LOSES when
+    # parallel; ~2M elements ≈ ~2 ms serial scan. MUST be recalibrated on
+    # native Linux (CI/AWS runner) — WSL2 thread-wake latency inflates it.
+    parallel_threshold: int = 2_000_000
     parallel_min_groups: int = 64
-    gpu_min_bytes: int = 1 << 26    # 64 MiB
-    simd_width: int = 0             # 0 = native
+    gpu_min_bytes: int = 1 << 26  # 64 MiB
+    simd_width: int = 0  # 0 = native
 
     @classmethod
     def from_env(cls) -> MojaggConfig:

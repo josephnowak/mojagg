@@ -6,8 +6,27 @@ This package is the PUBLIC CONTRACT: function names, signatures, and NaN/NaT
 semantics must match numbagg exactly. See tests/python/ (the executable spec).
 """
 
+from mojagg.compat import is_registered, patch, register, unregister
 from mojagg.config import MojaggConfig, config, get_config, set_config
-from mojagg.nanfuncs import nansum
+from mojagg.fill import bfill, ffill
+from mojagg.matrix import nancorrmatrix, nancovmatrix
+from mojagg.nanfuncs import (
+    allnan,
+    anynan,
+    count,
+    nanargmax,
+    nanargmin,
+    nancount,
+    nanmax,
+    nanmean,
+    nanmedian,
+    nanmin,
+    nanprod,
+    nanquantile,
+    nanstd,
+    nansum,
+    nanvar,
+)
 
 __version__ = "0.1.0"
 
@@ -17,11 +36,31 @@ __all__ = [
     "config",
     "get_config",
     "set_config",
+    # nanfuncs
+    "allnan",
+    "anynan",
+    "count",
+    "nanargmax",
+    "nanargmin",
+    "nancount",
+    "nanmax",
+    "nanmean",
+    "nanmedian",
+    "nanmin",
+    "nanprod",
+    "nanquantile",
+    "nanstd",
     "nansum",
-    # Function families are re-exported here as their Mojo bindings land:
-    # nanfuncs: nanmean nanstd nanvar nanmin nanmax nancount ...
-    # groupby:  group_nansum group_nanmean group_nanvar ...
-    # rolling:  move_sum move_mean move_std move_var move_cov move_corr
-    # exp:      move_exp_nansum move_exp_nanmean ...
-    # fill:     ffill bfill
+    "nanvar",
+    # fill
+    "bfill",
+    "ffill",
+    # matrix
+    "nancorrmatrix",
+    "nancovmatrix",
+    # compat
+    "is_registered",
+    "patch",
+    "register",
+    "unregister",
 ]

@@ -20,7 +20,10 @@ SRC = ROOT / "src"
 # (pattern, message). Applied to kernel/driver files only (not bindings).
 KERNEL_RULES = [
     (re.compile(r"\bprint\("), "no print() in kernels/drivers"),
-    (re.compile(r"\bList\[[^\]]+\]\(\)"), "no ad-hoc List() allocation in kernels (allocate up front)"),
+    (
+        re.compile(r"\bList\[[^\]]+\]\(\)"),
+        "no ad-hoc List() allocation in kernels (allocate up front)",
+    ),
     (re.compile(r"\bappend\("), "no append() (dynamic growth) in kernels"),
 ]
 

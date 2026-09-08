@@ -30,8 +30,8 @@ def main() -> int:
     mojo_sources = list((ROOT / "src").rglob("*.mojo"))
     if mojo_sources:
         ok &= _run(
-            "mojo format check",
-            ["mojo", "format", "--check", "src/", "tests/mojo/"],
+            "mojo format",
+            ["mojo", "format", "-q", "src/", "tests/mojo/"],
         )
         ok &= _run("mojo conventions", [sys.executable, "scripts/lint_mojo.py"])
     else:

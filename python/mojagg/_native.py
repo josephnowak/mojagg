@@ -3,7 +3,7 @@
 The extension is built out-of-band by `pixi run build-ext` (mojo build
 --emit shared-lib) and placed on the package path. This module locates and
 imports it, re-exporting the bound functions at module scope so facade code
-does `from mojagg import _native; _native.nansum_f64_flat(...)`.
+does `from mojagg import _native; _native.nansum_f64(...)`.
 
 During development, `mojo.importer` can auto-compile from source instead.
 """
@@ -55,19 +55,15 @@ try:
 except ImportError:  # pragma: no cover - allows importing mojagg before build
     nanfuncs = None
 
-# Flat binding entry points (thin; see facade for axis-aware public API).
+# Native binding entry points (thin; see facade for axis-aware public API).
+# Re-export every public binding (e.g. `nansum_f64`) at module scope so
+# facade code does `from mojagg import _native; _native.nansum_f64(...)`.
 if nanfuncs is not None:
-    nansum_f64_flat = nanfuncs.nansum_f64_flat
-    nansum_f32_flat = nanfuncs.nansum_f32_flat
-    sum_i64_flat = nanfuncs.sum_i64_flat
-    sum_i32_flat = nanfuncs.sum_i32_flat
+    for _name in dir(nanfuncs):
+        if not _name.startswith("_"):
+            globals()[_name] = getattr(nanfuncs, _name)
+    del _name
 else:  # pragma: no cover
-    def _missing(*_a, **_k):
-        raise ImportError(
-            "mojagg native extension not built. Run `pixi run build-ext`."
-        )
 
-    nansum_f64_flat = _missing
-    nansum_f32_flat = _missing
-    sum_i64_flat = _missing
-    sum_i32_flat = _missing
+    def __getattr__(name: str):
+        raise ImportError("mojagg native extension not built. Run `pixi run build-ext`.")
