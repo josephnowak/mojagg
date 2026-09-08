@@ -36,3 +36,4 @@ bottleneck = ">=1.4"
 ruff = ">=0.8"
 auditwheel = ">=6"     # manylinux wheel repair
 patchelf = ">=0.19.1,<0.20"
+pandas = ">=3.0.5,<4"
