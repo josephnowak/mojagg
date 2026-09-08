@@ -10,6 +10,7 @@ Usage:
 
 from __future__ import annotations
 
+import contextlib
 import os
 import platform
 import shutil
@@ -102,6 +103,10 @@ def main() -> int:
     exe = mojo()
     OUT_DIR.mkdir(parents=True, exist_ok=True)
     for name in BINDINGS:
+        # Clean stale shared libraries from other Python versions before building.
+        for old_so in OUT_DIR.glob(f"{name}*.so"):
+            with contextlib.suppress(OSError):
+                old_so.unlink()
         out = build_binding(name, exe, mcpu=mcpu)
         print("built:", out)
     if wheel:

@@ -24,7 +24,7 @@ bench-reference = { cmd = "python -m benchmarks.compare_numbagg", env = { PYTHON
 [dependencies]
 mojo = ">=1.0.0,<2"
 max = ">=26.5.0,<27"
-python = ">=3.11"
+python = ">=3.10"
 pip = ">=25"
 setuptools = ">=69"
 wheel = ">=0.45"
@@ -36,4 +36,28 @@ bottleneck = ">=1.4"
 ruff = ">=0.8"
 auditwheel = ">=6"     # manylinux wheel repair
 patchelf = ">=0.19.1,<0.20"
-pandas = ">=3.0.5,<4"
+pandas = ">=2.0,<4"
+
+[feature.py310.dependencies]
+python = "3.10.*"
+
+[feature.py311.dependencies]
+python = "3.11.*"
+
+[feature.py312.dependencies]
+python = "3.12.*"
+
+[feature.py313.dependencies]
+python = "3.13.*"
+
+[feature.py314.dependencies]
+python = "3.14.*"
+
+[environments]
+default = ["py314"]
+py310 = ["py310"]
+py311 = ["py311"]
+py312 = ["py312"]
+py313 = ["py313"]
+py314 = ["py314"]
+

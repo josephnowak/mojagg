@@ -51,16 +51,22 @@ jobs:
   test-python:
     runs-on: ubuntu-latest
     needs: lint
+    strategy:
+      fail-fast: false
+      matrix:
+        environment: ["py310", "py311", "py312", "py313", "py314"]
     steps:
       - uses: actions/checkout@v7
       - name: Set up pixi
         uses: prefix-dev/setup-pixi@v0.10.2
         with:
           cache: true
+          environments: ${{ matrix.environment }}
+          activate-environment: ${{ matrix.environment }}
       - name: Build extension
-        run: pixi run build-ext
+        run: pixi run -e ${{ matrix.environment }} build-ext
       - name: Parity tests vs numbagg (skip GPU)
-        run: pixi run test
+        run: pixi run -e ${{ matrix.environment }} test
 
   wheel-size:
     runs-on: ubuntu-latest
