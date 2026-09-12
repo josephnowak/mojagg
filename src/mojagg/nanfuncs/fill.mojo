@@ -1,19 +1,34 @@
-"""Forward and backward fill kernels."""
+"""Forward and backward fill operations for the generic GUFunc driver.
 
-from std.algorithm import vectorize
-from std.collections import InlineArray
+The driver presents one contiguous input and output span for every logical
+core. A fill is stateful along that span, so it deliberately stays scalar for
+floating point values; integer specializations are a bulk copy because they
+cannot contain NaNs.
+"""
+
 from std.math import isnan
-from std.sys.info import simd_width_of
+from std.memory import unsafe_memcpy
 
-from mojagg.core.ndview import DimArray
 from mojagg.core.numeric import nan_or_zero
-from mojagg.drivers.gufunc import GUFuncKernel, GUFuncPlan
+from mojagg.core.tensor_view import TensorArg
+from mojagg.drivers.gufunc import GUFuncOperation
 
 
-struct FillKernel[dtype: DType, backward: Bool = False](Copyable, GUFuncKernel):
-    comptime value_dtype = Self.dtype
-    comptime out_dtype = Self.dtype
-    comptime NUM_INPUTS = 1
+struct FillKernel[
+    dtype: DType,
+    backward: Bool = False,
+](GUFuncOperation, ImplicitlyCopyable):
+    """Fill NaN runs in one core.
+
+    ``limit < 0`` permits an unlimited run after a valid value. A nonnegative
+    limit permits at most that many missing values to inherit the last valid
+    value. Leading missing values remain NaN for floating point input.
+    """
+
+    comptime Tensors = Tuple[
+        TensorArg[Self.dtype, False],
+        TensorArg[Self.dtype, True],
+    ]
 
     var limit: Int
 
@@ -22,198 +37,51 @@ struct FillKernel[dtype: DType, backward: Bool = False](Copyable, GUFuncKernel):
 
     @always_inline
     @staticmethod
-    def _update_state(
-        val: Scalar[Self.value_dtype],
-        actual_limit: Int,
-        mut current: Scalar[Self.value_dtype],
-        mut lives_remaining: Int,
-    ) -> Scalar[Self.value_dtype]:
-        if isnan(val):
-            if lives_remaining <= 0:
-                current = nan_or_zero[Self.value_dtype]()
-            lives_remaining -= 1
-        else:
-            lives_remaining = actual_limit
-            current = val
-        return current
-
-    @always_inline
-    @staticmethod
-    def _chunk_offset[width: Int](chunk_idx: Int, n: Int) -> Int:
+    def _start(n: Int) -> Int:
         comptime if Self.backward:
-            return n - chunk_idx - width
-        else:
-            return chunk_idx
-
-    @always_inline
-    @staticmethod
-    def _lane_idx[width: Int](s: Int) -> Int:
-        comptime if Self.backward:
-            return width - 1 - s
-        else:
-            return s
-
-    @always_inline
-    @staticmethod
-    def _stride_step(stride: Int) -> Int:
-        comptime if Self.backward:
-            return -stride
-        else:
-            return stride
-
-    @always_inline
-    @staticmethod
-    def _start_offset(stride: Int, n: Int) -> Int:
-        comptime if Self.backward:
-            return (n - 1) * stride
+            return n - 1
         else:
             return 0
 
     @always_inline
-    def apply_contig(
-        self,
-        in_ptrs: InlineArray[
-            Pointer[mut=True, Scalar[Self.value_dtype], MutAnyOrigin],
-            Self.NUM_INPUTS,
-        ],
-        out_ptr: Pointer[mut=True, Scalar[Self.out_dtype], MutAnyOrigin],
-        n: Int,
-        worker_id: Int = 0,
-    ):
-        var src = in_ptrs[0]
-        var dst = out_ptr
-        comptime if Self.value_dtype.is_floating_point():
-            comptime W = simd_width_of[Self.value_dtype]()
-            var current = nan_or_zero[Self.value_dtype]()
-            var actual_limit = self.limit if self.limit >= 0 else n
-            var lives_remaining = actual_limit
-
-            def step[
-                width: Int
-            ](chunk_idx: Int) {
-                imm src,
-                imm dst,
-                imm actual_limit,
-                imm n,
-                mut current,
-                mut lives_remaining,
-            }:
-                var i = Self._chunk_offset[width](chunk_idx, n)
-                var v = src.unsafe_load[width=width](i)
-                var out_vec = SIMD[Self.value_dtype, width]()
-                comptime for s in range(width):
-                    comptime k = Self._lane_idx[width](s)
-                    out_vec[k] = Self._update_state(
-                        v[k], actual_limit, current, lives_remaining
-                    )
-                dst.unsafe_store[width=width](i, out_vec)
-
-            vectorize[W](n, step)
+    @staticmethod
+    def _step() -> Int:
+        comptime if Self.backward:
+            return -1
         else:
-            comptime W = simd_width_of[Self.value_dtype]()
-
-            def step_copy[width: Int](i: Int) {imm src, imm dst}:
-                dst.unsafe_store[width=width](
-                    i, src.unsafe_load[width=width](i)
-                )
-
-            vectorize[W](n, step_copy)
+            return 1
 
     @always_inline
-    def apply_strided(
-        self,
-        in_ptrs: InlineArray[
-            Pointer[mut=True, Scalar[Self.value_dtype], MutAnyOrigin],
-            Self.NUM_INPUTS,
-        ],
-        in_strides: InlineArray[Int, Self.NUM_INPUTS],
-        out_ptr: Pointer[mut=True, Scalar[Self.out_dtype], MutAnyOrigin],
-        out_stride: Int,
-        n: Int,
-        worker_id: Int = 0,
-    ):
-        var src = in_ptrs[0]
-        var dst = out_ptr
-        var s_step = Self._stride_step(in_strides[0])
-        var d_step = Self._stride_step(out_stride)
-        var src_off = Self._start_offset(in_strides[0], n)
-        var dst_off = Self._start_offset(out_stride, n)
-        var actual_limit = self.limit if self.limit >= 0 else n
-        var lives_remaining = actual_limit
-        var current = nan_or_zero[Self.value_dtype]()
+    def apply(mut self, tensors: Self.Tensors):
+        var source_view = tensors[0].copy()
+        var destination_view = tensors[1].copy()
+        var source = source_view.read_span()
+        var destination = destination_view.write_span()
+        var n = len(source)
 
-        comptime if Self.value_dtype.is_floating_point():
-            for _ in range(n):
-                dst[unsafe_offset=dst_off] = Self._update_state(
-                    src[unsafe_offset=src_off],
-                    actual_limit,
-                    current,
-                    lives_remaining,
-                )
-                src_off += s_step
-                dst_off += d_step
+        comptime if Self.dtype.is_floating_point():
+            var current = nan_or_zero[Self.dtype]()
+            var allowed = self.limit if self.limit >= 0 else n
+            var remaining = allowed
+            var i = Self._start(n)
+            var step = Self._step()
+            while i >= 0 and i < n:
+                var value = source.unsafe_ptr()[unsafe_offset=i]
+                if isnan(value):
+                    if remaining <= 0:
+                        current = nan_or_zero[Self.dtype]()
+                    remaining -= 1
+                else:
+                    current = value
+                    remaining = allowed
+                destination.unsafe_ptr()[unsafe_offset=i] = current
+                i += step
         else:
-            for _ in range(n):
-                dst[unsafe_offset=dst_off] = src[unsafe_offset=src_off]
-                src_off += s_step
-                dst_off += d_step
-
-    def apply_multi(
-        self,
-        plan: GUFuncPlan[Self.value_dtype, Self.out_dtype, Self.NUM_INPUTS],
-        flat_o: Int,
-        worker_id: Int = 0,
-    ):
-        var in_base = plan.in_base(0, flat_o)
-        var out_base = plan.out_base(flat_o)
-        var ctr = DimArray(fill=0)
-        var in_rbase = 0
-        var out_rbase = 0
-        var last = plan.k - 1
-        var in_ptrs = InlineArray[
-            Pointer[mut=True, Scalar[Self.value_dtype], MutAnyOrigin],
-            Self.NUM_INPUTS,
-        ](
-            fill=Pointer[mut=True, Scalar[Self.value_dtype], MutAnyOrigin](
-                unsafe_from_address=plan.in_addrs[0]
+            unsafe_memcpy(
+                dest=destination.unsafe_ptr(),
+                src=source.unsafe_ptr(),
+                count=n,
             )
-        )
-        for block in range(plan.rcount):
-            var src = Pointer[mut=True, Scalar[Self.value_dtype], MutAnyOrigin](
-                unsafe_from_address=plan.in_addrs[0]
-            ).unsafe_offset(in_base + in_rbase)
-            var dst = Pointer[mut=True, Scalar[Self.out_dtype], MutAnyOrigin](
-                unsafe_from_address=plan.out_addr
-            ).unsafe_offset(out_base + out_rbase)
-            in_ptrs[0] = src
-            if plan.inner_in_strides[0] == 1 and plan.inner_out_stride == 1:
-                self.apply_contig(in_ptrs, dst, plan.rs[last], worker_id)
-            else:
-                self.apply_strided(
-                    in_ptrs,
-                    plan.inner_in_strides,
-                    dst,
-                    plan.inner_out_stride,
-                    plan.rs[last],
-                    worker_id,
-                )
-            var d = plan.k - 2
-            while d >= 0:
-                ctr[d] += 1
-                in_rbase += plan.in_rt[0][d]
-                out_rbase += plan.out_rt[d]
-                if ctr[d] < plan.rs[d]:
-                    break
-                ctr[d] = 0
-                in_rbase -= plan.rs[d] * plan.in_rt[0][d]
-                out_rbase -= plan.rs[d] * plan.out_rt[d]
-                d -= 1
-
-    def empty_result(
-        self,
-        out_ptr: Pointer[mut=True, Scalar[Self.out_dtype], MutAnyOrigin],
-    ):
-        pass
 
 
 comptime FFill[dtype: DType] = FillKernel[dtype, False]

@@ -37,8 +37,12 @@ jobs:
         run: pixi run python scripts/lint_mojo.py
 
   test-mojo:
-    runs-on: ubuntu-latest
+    runs-on: ${{ matrix.os }}
     needs: lint
+    strategy:
+      fail-fast: false
+      matrix:
+        os: [ubuntu-latest, macos-latest]
     steps:
       - uses: actions/checkout@v7
       - name: Set up pixi
@@ -49,11 +53,12 @@ jobs:
         run: pixi run test-mojo
 
   test-python:
-    runs-on: ubuntu-latest
+    runs-on: ${{ matrix.os }}
     needs: lint
     strategy:
       fail-fast: false
       matrix:
+        os: [ubuntu-latest, macos-latest]
         environment: ["py310", "py311", "py312", "py313", "py314"]
     steps:
       - uses: actions/checkout@v7
@@ -68,9 +73,13 @@ jobs:
       - name: Parity tests vs numbagg (skip GPU)
         run: pixi run -e ${{ matrix.environment }} test
 
-  wheel-size:
-    runs-on: ubuntu-latest
+  wheel-build:
+    runs-on: ${{ matrix.os }}
     needs: [test-mojo, test-python]
+    strategy:
+      fail-fast: false
+      matrix:
+        os: [ubuntu-latest, macos-latest]
     steps:
       - uses: actions/checkout@v7
       - name: Set up pixi
@@ -79,5 +88,18 @@ jobs:
           cache: true
       - name: Build wheel
         run: pixi run build-wheel
+      - name: Repair wheel
+        run: |
+          mkdir -p dist/repaired
+          if [ "${{ runner.os }}" = "Linux" ]; then
+            pixi run auditwheel repair dist/*.whl -w dist/repaired
+          elif [ "${{ runner.os }}" = "macOS" ]; then
+            pixi run delocate-wheel -w dist/repaired -v dist/*.whl
+          fi
+      - name: Smoke-test installed wheel
+        run: |
+          WHEEL=$(ls dist/repaired/*.whl 2>/dev/null || ls dist/*.whl)
+          pixi run python -m pip install --force-reinstall "$WHEEL"
+          pixi run python -c "import mojagg, numpy as np; a=np.arange(10,dtype=np.float64); a[3]=np.nan; print('wheel smoke test:', mojagg.nansum(a))"
       - name: Check wheel size budget
-        run: python scripts/check_wheel_size.py --max-mb 20 dist/*.whl
+        run: python scripts/check_wheel_size.py --max-mb 20 dist/*.whl dist/repaired/*.whl

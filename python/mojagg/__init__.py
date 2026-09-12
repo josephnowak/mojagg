@@ -9,6 +9,23 @@ semantics must match numbagg exactly. See tests/python/ (the executable spec).
 from mojagg.compat import is_registered, patch, register, unregister
 from mojagg.config import MojaggConfig, config, get_config, set_config
 from mojagg.fill import bfill, ffill
+from mojagg.groupby import (
+    group_nanall,
+    group_nanany,
+    group_nanargmax,
+    group_nanargmin,
+    group_nancount,
+    group_nanfirst,
+    group_nanlast,
+    group_nanmax,
+    group_nanmean,
+    group_nanmin,
+    group_nanprod,
+    group_nanstd,
+    group_nansum,
+    group_nansum_of_squares,
+    group_nanvar,
+)
 from mojagg.matrix import nancorrmatrix, nancovmatrix
 from mojagg.nanfuncs import (
     allnan,
@@ -58,6 +75,22 @@ __all__ = [
     # matrix
     "nancorrmatrix",
     "nancovmatrix",
+    # groupby
+    "group_nanall",
+    "group_nanany",
+    "group_nanargmax",
+    "group_nanargmin",
+    "group_nancount",
+    "group_nanfirst",
+    "group_nanlast",
+    "group_nanmax",
+    "group_nanmean",
+    "group_nanmin",
+    "group_nanprod",
+    "group_nanstd",
+    "group_nansum",
+    "group_nansum_of_squares",
+    "group_nanvar",
     # compat
     "is_registered",
     "patch",

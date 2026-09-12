@@ -1,571 +1,447 @@
-"""apply_gufunc — Unified Generalized Universal Function (GUFunc) driver.
+"""Native-tuple universal function driver.
 
-Modeled after Numba/NumPy guvectorize conventions:
-- Reductions: `(n) -> ()` (scalar output per outer slice)
-- Transforms: `(n) -> (n)` (array output per outer slice)
-- Groupby / Multi-input: `(n),(n) -> (m)` (supports arbitrary NUM_INPUTS)
+Every operation supplies one concrete heterogeneous Mojo ``Tuple`` through
+``GUFuncOperation.Tensors`` and implements only ``apply(tensors)``.  Tuple
+elements are ``TensorArg[dtype, writable]`` values.  The driver specializes
+its traversal over the tuple's compile-time type pack, so it can handle mixed
+dtypes without boxing or runtime dtype dispatch.
 
-Outer dimensions loop across independent slices (serially or parallelized via
-`parallelize(worker, NUM_WORKERS)`). For each slice, mixed-radix decomposition
-resolves base pointers for each input and the output, then dispatches to
-a single unified `apply_slice` function.
+For each outer slice the driver:
+
+1. computes an affine address for every tuple element;
+2. copies only non-writable, non-contiguous read cores into one reusable
+   scratch region per worker; and
+3. binds all prepared descriptors before calling the operation.
+
+Writable elements always point directly into caller-owned output storage.  A
+worker receives a copy of the operation, allowing operation-owned temporary
+workspace to remain private to that worker.
 """
 
-from std.collections import InlineArray, Span
-
 from max.algorithm import parallelize
+from std.collections import InlineArray
+from std.memory import alloc, dealloc
+from std.memory.alloc import Layout as AllocLayout
 
-from mojagg.core.ndview import DimArray, NDView
-from mojagg.core.reduce1d import Reduction1D
-
-# Scenario identifiers (runtime Int; classified once in `GUFuncPlan.build`).
-comptime SCENARIO_MERGED = 0
-comptime SCENARIO_STRIDED = 1
-comptime SCENARIO_MULTI = 2
-
-# Coarse parallel chunking: one task per worker.
-comptime NUM_WORKERS = 16
+from mojagg.core.tensor_view import (
+    DimArray,
+    MAX_RANK,
+    OperandPlan,
+    TensorArgProtocol,
+)
 
 
-struct GUFuncPlan[
-    dtype: DType,
-    out_dtype: DType,
-    NUM_INPUTS: Int = 1,
-](Copyable):
-    """Everything per-slice dispatch needs, computed once per call.
+trait GUFuncOperation(Copyable & Deinitable):
+    """Operation contract consumed by ``GUFunc``.
 
-    Supports arbitrary NUM_INPUTS via stack-allocated InlineArray.
+    Each operation declares one fixed-arity native tuple, for example::
+
+        comptime Tensors = Tuple[
+            TensorArg[DType.float64, False],
+            TensorArg[DType.float32, True],
+        ]
+
+    The first element is conventionally a read tensor and writable elements
+    are direct output tensors.  The tuple is part of the operation's
+    compilation-time contract: dtypes, mutability, and arity are fixed for
+    every specialization.  ``GUFunc.execute`` accepts the corresponding
+    native tuple pack (``Tuple[*Args]`` with ``TensorArgProtocol`` elements)
+    and rebinds it to ``Op.Tensors`` only at the final ``apply`` call.  The
+    rebind has no runtime cost and prevents boxing or dynamic dtype dispatch.
+
+    Mojo traits cannot currently parameterize a variadic tuple pack directly,
+    so the associated ``Tensors`` type is the portable way to express this
+    contract while preserving a fully static operation interface.
     """
 
-    var in_addrs: InlineArray[Int, Self.NUM_INPUTS]
-    var out_addr: Int
-    var osizes: DimArray
-    var in_ostrides: InlineArray[DimArray, Self.NUM_INPUTS]
-    var out_ostrides: DimArray
-    var ko: Int
+    comptime Tensors: AnyType
+
+    def apply(mut self, tensors: Self.Tensors):
+        ...
+
+
+@fieldwise_init
+struct DispatchPolicy(Copyable):
+    """Value-only CPU scheduling policy."""
+
+    var workers: Int
+    var parallel_threshold: Int
+
+    @always_inline
+    def effective_workers(self, outer_count: Int, inner_length: Int) -> Int:
+        var requested = self.workers if self.workers > 0 else 16
+        if outer_count <= 1 or requested <= 1:
+            return 1
+        # The configured threshold is inclusive and applies to the complete
+        # outer domain, not just one slice.
+        var total_length = outer_count * inner_length
+        if total_length < max(self.parallel_threshold, 0):
+            return 1
+        return min(requested, outer_count)
+
+
+@fieldwise_init
+struct GUFuncPlan[NUM_TENSORS: Int](Copyable):
+    """Validated runtime metadata shared by all workers."""
+
+    var outer_rank: Int
     var outer_count: Int
-    var rs: DimArray
-    var in_rt: InlineArray[DimArray, Self.NUM_INPUTS]
-    var out_rt: DimArray
-    var k: Int
-    var n: Int
-    var inner_in_strides: InlineArray[Int, Self.NUM_INPUTS]
-    var inner_out_stride: Int
-    var rcount: Int
-    var scenario: Int
-
-    def __init__(
-        out self,
-        in_addrs: InlineArray[Int, Self.NUM_INPUTS],
-        out_addr: Int,
-        osizes: DimArray,
-        in_ostrides: InlineArray[DimArray, Self.NUM_INPUTS],
-        out_ostrides: DimArray,
-        ko: Int,
-        outer_count: Int,
-        rs: DimArray,
-        in_rt: InlineArray[DimArray, Self.NUM_INPUTS],
-        out_rt: DimArray,
-        k: Int,
-        n: Int,
-        inner_in_strides: InlineArray[Int, Self.NUM_INPUTS],
-        inner_out_stride: Int,
-        rcount: Int,
-        scenario: Int,
-    ):
-        self.in_addrs = in_addrs.copy()
-        self.out_addr = out_addr
-        self.osizes = osizes.copy()
-        self.in_ostrides = in_ostrides.copy()
-        self.out_ostrides = out_ostrides.copy()
-        self.ko = ko
-        self.outer_count = outer_count
-        self.rs = rs.copy()
-        self.in_rt = in_rt.copy()
-        self.out_rt = out_rt.copy()
-        self.k = k
-        self.n = n
-        self.inner_in_strides = inner_in_strides.copy()
-        self.inner_out_stride = inner_out_stride
-        self.rcount = rcount
-        self.scenario = scenario
-
-    def in_base(self, inp: Int, flat_o: Int) -> Int:
-        if self.ko == 0:
-            return 0
-        if self.ko == 1:
-            return flat_o * self.in_ostrides[inp][0]
-        var base = 0
-        var rem = flat_o
-        for d in range(self.ko - 1, -1, -1):
-            var q = rem % self.osizes[d]
-            base += q * self.in_ostrides[inp][d]
-            rem //= self.osizes[d]
-        return base
-
-    def out_base(self, flat_o: Int) -> Int:
-        if self.ko == 0:
-            return 0
-        if self.ko == 1:
-            return flat_o * self.out_ostrides[0]
-        var base = 0
-        var rem = flat_o
-        for d in range(self.ko - 1, -1, -1):
-            var q = rem % self.osizes[d]
-            base += q * self.out_ostrides[d]
-            rem //= self.osizes[d]
-        return base
-
-    def in_ptr(
-        self, inp: Int, flat_o: Int
-    ) -> Pointer[mut=True, Scalar[Self.dtype], MutAnyOrigin]:
-        return Pointer[mut=True, Scalar[Self.dtype], MutAnyOrigin](
-            unsafe_from_address=self.in_addrs[inp]
-        ).unsafe_offset(self.in_base(inp, flat_o))
-
-    def in_ptrs(
-        self, flat_o: Int
-    ) -> InlineArray[
-        Pointer[mut=True, Scalar[Self.dtype], MutAnyOrigin],
-        Self.NUM_INPUTS,
-    ]:
-        var ptrs = InlineArray[
-            Pointer[mut=True, Scalar[Self.dtype], MutAnyOrigin],
-            Self.NUM_INPUTS,
-        ](
-            fill=Pointer[mut=True, Scalar[Self.dtype], MutAnyOrigin](
-                unsafe_from_address=self.in_addrs[0]
-            )
-        )
-        comptime for i in range(Self.NUM_INPUTS):
-            ptrs[i] = self.in_ptr(i, flat_o)
-        return ptrs^
-
-    def out_ptr(
-        self, flat_o: Int
-    ) -> Pointer[mut=True, Scalar[Self.out_dtype], MutAnyOrigin]:
-        return Pointer[mut=True, Scalar[Self.out_dtype], MutAnyOrigin](
-            unsafe_from_address=self.out_addr
-        ).unsafe_offset(self.out_base(flat_o))
+    var outer_shape: DimArray
+    var tensors: InlineArray[OperandPlan, Self.NUM_TENSORS]
 
     @staticmethod
-    def build(
-        view: NDView[Self.dtype],
-        axes: DimArray,
-        k: Int,
-        out_addr: Int,
-        out_core_size: Int = 1,
-    ) -> Self:
-        """Build plan for a single-input reduction (n)->() or multi-output (n)->(m).
-        """
-        var in_reduced = DimArray(fill=0)
-        for i in range(k):
-            in_reduced[axes[i]] = 1
+    def _build_operand[
+        index: Int,
+        *Args: TensorArgProtocol,
+    ](
+        tensors: Tuple[*Args],
+        input_axes: DimArray,
+        input_core_rank: Int,
+        output_axes: DimArray,
+        output_core_rank: Int,
+        expected_outer_rank: Int,
+        expected_outer_shape: DimArray,
+    ) raises -> OperandPlan:
+        var operand = tensors[index].copy()
+        var rank = operand.rank()
+        if rank < 0 or rank > MAX_RANK:
+            raise Error("tensor rank exceeds gufunc capacity")
 
-        var osizes = DimArray(fill=0)
-        var ostrides = DimArray(fill=0)
-        var ko = 0
-        var outer_count = 1
-        for d in range(view.ndim):
-            if in_reduced[d] == 0:
-                osizes[ko] = view.sizes[d]
-                ostrides[ko] = view.strides[d]
-                outer_count *= view.sizes[d]
-                ko += 1
+        var axes = input_axes.copy()
+        var core_rank = input_core_rank
+        if operand.is_writable():
+            axes = output_axes.copy()
+            core_rank = output_core_rank
+        if core_rank < 0 or core_rank > rank:
+            raise Error("invalid tensor core rank")
 
-        var rs = DimArray(fill=0)
-        var rt = DimArray(fill=0)
-        for i in range(k):
-            rs[i] = view.sizes[axes[i]]
-            rt[i] = view.strides[axes[i]]
+        var plan = OperandPlan.empty()
+        plan.rank = rank
+        plan.core_rank = core_rank
+        plan.outer_rank = rank - core_rank
+        plan.core_length = 1
+        plan.outer_count = 1
+        plan.base_address = operand.base_address()
+        var selected = InlineArray[Bool, MAX_RANK](fill=False)
+        var has_zero_extent = False
 
-        var n = 1
-        for i in range(k):
-            n *= rs[i]
-        var inner_stride = rt[k - 1]
+        for d in range(rank):
+            plan.shape[d] = operand.shape_at(d)
+            plan.stride[d] = operand.stride_at(d)
+            if plan.shape[d] < 0:
+                raise Error("negative tensor dimension")
+            if plan.shape[d] == 0:
+                has_zero_extent = True
 
-        var merged = rt[k - 1] == 1
-        var i = k - 2
-        while merged and i >= 0:
-            if rt[i] != rt[i + 1] * rs[i + 1]:
-                merged = False
-            i -= 1
+        for d in range(core_rank):
+            var axis = axes[d]
+            if axis < 0 or axis >= rank or selected[axis]:
+                raise Error("core axes must be normalized and unique")
+            selected[axis] = True
+            plan.core_shape[d] = plan.shape[axis]
+            plan.core_stride[d] = plan.stride[axis]
+            plan.core_length *= plan.core_shape[d]
 
-        var scenario = SCENARIO_MULTI
-        if merged:
-            scenario = SCENARIO_MERGED
-        elif k == 1:
-            scenario = SCENARIO_STRIDED
+        var outer_index = 0
+        for d in range(rank):
+            if not selected[d]:
+                plan.outer_shape[outer_index] = plan.shape[d]
+                plan.outer_stride[outer_index] = plan.stride[d]
+                plan.outer_count *= plan.outer_shape[outer_index]
+                outer_index += 1
 
-        var rcount = 1
-        for j in range(k - 1):
-            rcount *= rs[j]
+        if expected_outer_rank >= 0:
+            if plan.outer_rank != expected_outer_rank:
+                raise Error("tensor outer ranks do not match")
+            for d in range(expected_outer_rank):
+                if plan.outer_shape[d] != expected_outer_shape[d]:
+                    raise Error("tensor outer shapes do not match")
 
-        var out_ostrides = DimArray(fill=0)
-        var s = out_core_size
-        for d in range(ko - 1, -1, -1):
-            out_ostrides[d] = s
-            s *= osizes[d]
+        # A zero-length core receives an empty span and needs no copy.
+        plan.core_contiguous = True
+        if plan.core_rank > 0 and plan.core_length > 0:
+            var expected_stride = 1
+            for d in range(plan.core_rank - 1, -1, -1):
+                if (
+                    plan.core_shape[d] > 1
+                    and plan.core_stride[d] != expected_stride
+                ):
+                    plan.core_contiguous = False
+                expected_stride *= plan.core_shape[d]
 
-        var in_addrs = InlineArray[Int, Self.NUM_INPUTS](fill=0)
-        in_addrs[0] = view.addr
-        var in_ostrides = InlineArray[DimArray, Self.NUM_INPUTS](
-            fill=DimArray(fill=0)
-        )
-        in_ostrides[0] = ostrides.copy()
-        var in_rt = InlineArray[DimArray, Self.NUM_INPUTS](
-            fill=DimArray(fill=0)
-        )
-        in_rt[0] = rt.copy()
-        var inner_in_strides = InlineArray[Int, Self.NUM_INPUTS](fill=0)
-        inner_in_strides[0] = inner_stride
-        var out_rt = DimArray(fill=0)
-        var inner_out_stride = 0
+        if operand.is_writable():
+            # Empty outputs may have arbitrary NumPy strides because no store
+            # occurs.  Non-empty writable views must be direct C-contiguous
+            # storage, including the selected output core.
+            if not has_zero_extent:
+                var expected_stride = 1
+                for d in range(rank - 1, -1, -1):
+                    if plan.shape[d] > 1 and plan.stride[d] != expected_stride:
+                        raise Error("writable tensor must be C-contiguous")
+                    expected_stride *= plan.shape[d]
+            if plan.core_rank > 0 and plan.core_length > 0:
+                var core_expected = 1
+                for d in range(plan.core_rank - 1, -1, -1):
+                    if (
+                        plan.core_shape[d] > 1
+                        and plan.core_stride[d] != core_expected
+                    ):
+                        raise Error("writable core must be contiguous")
+                    core_expected *= plan.core_shape[d]
 
-        return Self(
-            in_addrs,
-            out_addr,
-            osizes,
-            in_ostrides,
-            out_ostrides,
-            ko,
-            outer_count,
-            rs,
-            in_rt,
-            out_rt,
-            k,
-            n,
-            inner_in_strides,
-            inner_out_stride,
-            rcount,
-            scenario,
-        )
+        return plan^
 
     @staticmethod
-    def build_transform(
-        view: NDView[Self.dtype],
-        out_view: NDView[Self.out_dtype],
-        axes: DimArray,
-        k: Int,
-    ) -> Self:
-        """Build plan for a single-input transform (n)->(n)."""
-        var in_reduced = DimArray(fill=0)
-        for i in range(k):
-            in_reduced[axes[i]] = 1
+    def build[
+        *Args: TensorArgProtocol
+    ](
+        tensors: Tuple[*Args],
+        input_axes: DimArray,
+        input_core_rank: Int,
+        output_axes: DimArray,
+        output_core_rank: Int,
+    ) raises -> Self:
+        """Construct and validate the complete execution plan."""
 
-        var osizes = DimArray(fill=0)
-        var ostrides = DimArray(fill=0)
-        var out_ostrides = DimArray(fill=0)
-        var ko = 0
-        var outer_count = 1
-        for d in range(view.ndim):
-            if in_reduced[d] == 0:
-                osizes[ko] = view.sizes[d]
-                ostrides[ko] = view.strides[d]
-                out_ostrides[ko] = out_view.strides[d]
-                outer_count *= view.sizes[d]
-                ko += 1
+        comptime assert len(Args) == Self.NUM_TENSORS
+        comptime assert Self.NUM_TENSORS > 1
 
-        var rs = DimArray(fill=0)
-        var rt = DimArray(fill=0)
-        var out_rt = DimArray(fill=0)
-        for i in range(k):
-            rs[i] = view.sizes[axes[i]]
-            rt[i] = view.strides[axes[i]]
-            out_rt[i] = out_view.strides[axes[i]]
+        var first = tensors[0].copy()
+        if first.is_writable():
+            raise Error("the first GUFunc tensor must be a read input")
 
-        var n = 1
-        for i in range(k):
-            n *= rs[i]
-        var inner_stride = rt[k - 1]
-        var out_inner_stride = out_view.strides[axes[k - 1]]
-
-        var merged = rt[k - 1] == 1 and out_inner_stride == 1
-        var i = k - 2
-        while merged and i >= 0:
-            if rt[i] != rt[i + 1] * rs[i + 1]:
-                merged = False
-            if out_rt[i] != out_rt[i + 1] * rs[i + 1]:
-                merged = False
-            i -= 1
-
-        var scenario = SCENARIO_MULTI
-        if merged:
-            scenario = SCENARIO_MERGED
-        elif k == 1:
-            scenario = SCENARIO_STRIDED
-
-        var rcount = 1
-        for j in range(k - 1):
-            rcount *= rs[j]
-
-        var in_addrs = InlineArray[Int, Self.NUM_INPUTS](fill=0)
-        in_addrs[0] = view.addr
-        var in_ostrides = InlineArray[DimArray, Self.NUM_INPUTS](
-            fill=DimArray(fill=0)
+        var plans = InlineArray[OperandPlan, Self.NUM_TENSORS](
+            fill=OperandPlan.empty()
         )
-        in_ostrides[0] = ostrides.copy()
-        var in_rt = InlineArray[DimArray, Self.NUM_INPUTS](
-            fill=DimArray(fill=0)
+        var reference = Self._build_operand[0, *Args](
+            tensors,
+            input_axes,
+            input_core_rank,
+            output_axes,
+            output_core_rank,
+            -1,
+            DimArray(fill=1),
         )
-        in_rt[0] = rt.copy()
-        var inner_in_strides = InlineArray[Int, Self.NUM_INPUTS](fill=0)
-        inner_in_strides[0] = inner_stride
+        plans[0] = reference.copy()
+
+        comptime for i in range(1, Self.NUM_TENSORS):
+            plans[i] = Self._build_operand[i, *Args](
+                tensors,
+                input_axes,
+                input_core_rank,
+                output_axes,
+                output_core_rank,
+                reference.outer_rank,
+                reference.outer_shape.copy(),
+            )
 
         return Self(
-            in_addrs,
-            out_view.addr,
-            osizes,
-            in_ostrides,
-            out_ostrides,
-            ko,
-            outer_count,
-            rs,
-            in_rt,
-            out_rt,
-            k,
-            n,
-            inner_in_strides,
-            out_inner_stride,
-            rcount,
-            scenario,
+            reference.outer_rank,
+            reference.outer_count,
+            reference.outer_shape.copy(),
+            plans^,
         )
 
 
-trait GUFuncKernel(Copyable & Deinitable):
-    comptime value_dtype: DType
-    comptime out_dtype: DType
-    comptime NUM_INPUTS: Int = 1
+@always_inline
+def outer_offset(plan: OperandPlan, flat_outer: Int) -> Int:
+    """Decode one row-major outer index into an element offset."""
 
-    def apply_contig(
-        self,
-        in_ptrs: InlineArray[
-            Pointer[mut=True, Scalar[Self.value_dtype], MutAnyOrigin],
-            Self.NUM_INPUTS,
-        ],
-        out_ptr: Pointer[mut=True, Scalar[Self.out_dtype], MutAnyOrigin],
-        n: Int,
-        worker_id: Int = 0,
-    ):
-        ...
-
-    def apply_strided(
-        self,
-        in_ptrs: InlineArray[
-            Pointer[mut=True, Scalar[Self.value_dtype], MutAnyOrigin],
-            Self.NUM_INPUTS,
-        ],
-        in_strides: InlineArray[Int, Self.NUM_INPUTS],
-        out_ptr: Pointer[mut=True, Scalar[Self.out_dtype], MutAnyOrigin],
-        out_stride: Int,
-        n: Int,
-        worker_id: Int = 0,
-    ):
-        ...
-
-    def apply_multi(
-        self,
-        plan: GUFuncPlan[Self.value_dtype, Self.out_dtype, Self.NUM_INPUTS],
-        flat_o: Int,
-        worker_id: Int = 0,
-    ):
-        ...
-
-    def empty_result(
-        self,
-        out_ptr: Pointer[mut=True, Scalar[Self.out_dtype], MutAnyOrigin],
-    ):
-        ...
+    var remaining = flat_outer
+    var offset = 0
+    for d in range(plan.outer_rank - 1, -1, -1):
+        var coordinate = remaining % plan.outer_shape[d]
+        remaining //= plan.outer_shape[d]
+        offset += coordinate * plan.outer_stride[d]
+    return offset
 
 
-struct ReduceKernel[Op: Reduction1D](Copyable, GUFuncKernel):
-    """Adapts a Reduction1D operation into the unified GUFuncKernel interface.
-    """
+def execute_range[
+    Op: GUFuncOperation,
+    *Args: TensorArgProtocol,
+](
+    mut op: Op,
+    tensors: Tuple[*Args],
+    plan: GUFuncPlan[len(Args)],
+    start: Int,
+    end: Int,
+    worker_id: Int,
+    scratch_base: Int,
+    scratch_stride: Int,
+    scratch_offsets: InlineArray[Int, len(Args)],
+):
+    """Prepare and execute one worker's range of outer slices."""
 
-    comptime value_dtype = Self.Op.value_dtype
-    comptime out_dtype = Self.Op.out_dtype
-    comptime NUM_INPUTS = 1
-
-    var op: Self.Op
-
-    def __init__(out self, op: Self.Op):
-        self.op = op.copy()
-
-    @always_inline
-    def apply_contig(
-        self,
-        in_ptrs: InlineArray[
-            Pointer[mut=True, Scalar[Self.value_dtype], MutAnyOrigin],
-            Self.NUM_INPUTS,
-        ],
-        out_ptr: Pointer[mut=True, Scalar[Self.out_dtype], MutAnyOrigin],
-        n: Int,
-        worker_id: Int = 0,
-    ):
-        var state = Self.Op.contig(
-            Span[Scalar[Self.value_dtype], MutAnyOrigin](
-                unsafe_ptr=in_ptrs[0], length=n
+    var local_tensors = tensors.copy()
+    for flat_outer in range(start, end):
+        comptime for i in range(len(Args)):
+            var operand = local_tensors[i].copy()
+            var offset = outer_offset(plan.tensors[i], flat_outer)
+            var address = (
+                plan.tensors[i].base_address + offset * operand.item_size()
             )
-        )
-        out_ptr[unsafe_offset=0] = self.op.finalize(state)
-
-    @always_inline
-    def apply_strided(
-        self,
-        in_ptrs: InlineArray[
-            Pointer[mut=True, Scalar[Self.value_dtype], MutAnyOrigin],
-            Self.NUM_INPUTS,
-        ],
-        in_strides: InlineArray[Int, Self.NUM_INPUTS],
-        out_ptr: Pointer[mut=True, Scalar[Self.out_dtype], MutAnyOrigin],
-        out_stride: Int,
-        n: Int,
-        worker_id: Int = 0,
-    ):
-        var state = Self.Op.strided(in_ptrs[0], n, in_strides[0])
-        out_ptr[unsafe_offset=0] = self.op.finalize(state)
-
-    def apply_multi(
-        self,
-        plan: GUFuncPlan[Self.value_dtype, Self.out_dtype, Self.NUM_INPUTS],
-        flat_o: Int,
-        worker_id: Int = 0,
-    ):
-        var base = plan.in_base(0, flat_o)
-        var acc = Self.Op.identity()
-        var ctr = DimArray(fill=0)
-        var rbase = 0
-        var last = plan.k - 1
-        for block in range(plan.rcount):
-            var p = Pointer[mut=True, Scalar[Self.value_dtype], MutAnyOrigin](
-                unsafe_from_address=plan.in_addrs[0]
-            ).unsafe_offset(base + rbase)
-            var partial: Self.Op.State
-            if plan.inner_in_strides[0] == 1:
-                partial = Self.Op.contig(
-                    Span[Scalar[Self.value_dtype], MutAnyOrigin](
-                        unsafe_ptr=p, length=plan.rs[last]
-                    )
+            if (
+                not operand.is_writable()
+                and not plan.tensors[i].core_contiguous
+                and plan.tensors[i].core_length > 0
+            ):
+                var destination = (
+                    scratch_base
+                    + worker_id * scratch_stride
+                    + scratch_offsets[i]
                 )
-            else:
-                partial = Self.Op.strided(
-                    p, plan.rs[last], plan.inner_in_strides[0]
-                )
-            acc = Self.Op.combine_at(acc, partial, block * plan.rs[last])
-            comptime if Self.Op.SHORT_CIRCUIT:
-                if Self.Op.is_terminal(acc):
-                    break
-            var d = plan.k - 2
-            while d >= 0:
-                ctr[d] += 1
-                rbase += plan.in_rt[0][d]
-                if ctr[d] < plan.rs[d]:
-                    break
-                ctr[d] = 0
-                rbase -= plan.rs[d] * plan.in_rt[0][d]
-                d -= 1
-        plan.out_ptr(flat_o)[unsafe_offset=0] = self.op.finalize(acc)
+                operand.copy_core(plan.tensors[i], offset, destination)
+                address = destination
+            operand.set_slice(address, plan.tensors[i].core_length)
+            local_tensors[i] = operand^
 
-    def empty_result(
-        self,
-        out_ptr: Pointer[mut=True, Scalar[Self.out_dtype], MutAnyOrigin],
-    ):
-        out_ptr[unsafe_offset=0] = self.op.finalize(Self.Op.identity())
+        # ``rebind`` is representation-only: both types are the same native
+        # Tuple and the operation's associated tuple is compile-time exact.
+        op.apply(rebind[Op.Tensors](local_tensors))
 
 
-def apply_slice[
-    Op: GUFuncKernel
+def execute_serial_or_parallel[
+    Op: GUFuncOperation,
+    *Args: TensorArgProtocol,
 ](
     op: Op,
-    plan: GUFuncPlan[Op.value_dtype, Op.out_dtype, Op.NUM_INPUTS],
-    flat_o: Int,
-    worker_id: Int = 0,
+    tensors: Tuple[*Args],
+    plan: GUFuncPlan[len(Args)],
+    policy: DispatchPolicy,
+    scratch_base: Int,
+    scratch_stride: Int,
+    scratch_offsets: InlineArray[Int, len(Args)],
 ):
-    """Unified per-slice execution for generalized universal functions."""
-    var out_p = plan.out_ptr(flat_o)
-    if plan.n == 0:
-        op.empty_result(out_p)
+    """Run serially or create one independent operation per worker."""
+
+    var inner_length = 0
+    comptime for i in range(len(Args)):
+        var operand = tensors[i].copy()
+        if not operand.is_writable():
+            inner_length = max(inner_length, plan.tensors[i].core_length)
+    var tasks = policy.effective_workers(plan.outer_count, inner_length)
+
+    if tasks <= 1:
+        var worker_op = op.copy()
+        execute_range[Op, *Args](
+            worker_op,
+            tensors,
+            plan,
+            0,
+            plan.outer_count,
+            0,
+            scratch_base,
+            scratch_stride,
+            scratch_offsets,
+        )
         return
 
-    var in_ptrs = plan.in_ptrs(flat_o)
+    var chunk = (plan.outer_count + tasks - 1) // tasks
 
-    if plan.scenario == SCENARIO_MERGED:
-        op.apply_contig(in_ptrs, out_p, plan.n, worker_id)
-    elif plan.scenario == SCENARIO_STRIDED:
-        op.apply_strided(
-            in_ptrs,
-            plan.inner_in_strides,
-            out_p,
-            plan.inner_out_stride,
-            plan.n,
-            worker_id,
+    def worker(
+        index: Int,
+    ) {
+        imm op,
+        imm tensors,
+        imm plan,
+        imm chunk,
+        imm scratch_base,
+        imm scratch_stride,
+        imm scratch_offsets,
+    }:
+        var worker_op = op.copy()
+        var start = index * chunk
+        var stop = min(start + chunk, plan.outer_count)
+        execute_range[Op, *Args](
+            worker_op,
+            tensors,
+            plan,
+            start,
+            stop,
+            index,
+            scratch_base,
+            scratch_stride,
+            scratch_offsets,
         )
-    else:
-        op.apply_multi(plan, flat_o, worker_id)
+
+    parallelize(worker, tasks)
 
 
-def apply_gufunc[
-    Op: GUFuncKernel
-](
-    op: Op,
-    plan: GUFuncPlan[Op.value_dtype, Op.out_dtype, Op.NUM_INPUTS],
-    parallel_threshold: Int,
-    workers: Int = 0,
-):
-    """Unified GUFunc driver: parallelized coarse-chunked execution."""
-    var effective_workers = workers if workers > 0 else 16
-    if (
-        plan.outer_count > 1
-        and plan.outer_count * plan.n >= parallel_threshold
-        and effective_workers > 1
-    ):
-        var num_workers = min(effective_workers, plan.outer_count)
-        var chunk = (plan.outer_count + num_workers - 1) // num_workers
+struct GUFunc[Operation: GUFuncOperation](Copyable):
+    """Apply one operation over every outer slice of a native tensor tuple."""
 
-        def worker(w: Int) {imm op, imm plan, imm chunk}:
-            var start = w * chunk
-            var end = min(start + chunk, plan.outer_count)
-            for o in range(start, end):
-                apply_slice(op, plan, o, w)
+    var operation: Self.Operation
 
-        parallelize(worker, num_workers)
-    else:
-        for o in range(plan.outer_count):
-            apply_slice(op, plan, o, 0)
+    def __init__(out self, operation: Self.Operation):
+        self.operation = operation.copy()
 
+    def execute[
+        *Args: TensorArgProtocol
+    ](
+        self,
+        tensors: Tuple[*Args],
+        input_axes: DimArray,
+        input_core_rank: Int,
+        output_axes: DimArray,
+        output_core_rank: Int,
+        policy: DispatchPolicy,
+    ) raises:
+        """Build plans, materialize read cores, and call ``apply``."""
 
-def apply_gufunc[
-    Op: Reduction1D
-](
-    op: Op,
-    view: NDView[Op.value_dtype],
-    axes: DimArray,
-    k: Int,
-    out_addr: Int,
-    parallel_threshold: Int,
-    workers: Int = 0,
-):
-    """Reduce-axis driver: wraps Reduction1D into ReduceKernel and runs."""
-    var plan = GUFuncPlan[Op.value_dtype, Op.out_dtype, 1].build(
-        view, axes, k, out_addr
-    )
-    var kernel = ReduceKernel[Op](op)
-    apply_gufunc(kernel, plan, parallel_threshold, workers)
+        var plan = GUFuncPlan[len(Args)].build[*Args](
+            tensors,
+            input_axes,
+            input_core_rank,
+            output_axes,
+            output_core_rank,
+        )
+        if plan.outer_count == 0:
+            return
 
+        var inner_length = 0
+        comptime for i in range(len(Args)):
+            var operand = tensors[i].copy()
+            if not operand.is_writable():
+                inner_length = max(inner_length, plan.tensors[i].core_length)
+        var tasks = policy.effective_workers(plan.outer_count, inner_length)
 
-def apply_gufunc[
-    Op: GUFuncKernel
-](
-    op: Op,
-    view: NDView[Op.value_dtype],
-    out_view: NDView[Op.out_dtype],
-    axes: DimArray,
-    k: Int,
-    parallel_threshold: Int,
-    workers: Int = 0,
-):
-    """Transform / multi-input driver: builds plan and runs via GUFuncKernel."""
-    var plan = GUFuncPlan[
-        Op.value_dtype, Op.out_dtype, Op.NUM_INPUTS
-    ].build_transform(view, out_view, axes, k)
-    apply_gufunc(op, plan, parallel_threshold, workers)
+        var scratch_offsets = InlineArray[Int, len(Args)](fill=0)
+        var scratch_stride = 0
+        comptime for i in range(len(Args)):
+            var operand = tensors[i].copy()
+            if (
+                not operand.is_writable()
+                and not plan.tensors[i].core_contiguous
+                and plan.tensors[i].core_length > 0
+            ):
+                scratch_offsets[i] = ((scratch_stride + 63) // 64) * 64
+                scratch_stride = (
+                    scratch_offsets[i]
+                    + plan.tensors[i].core_length * operand.item_size()
+                )
+
+        if scratch_stride > 0:
+            scratch_stride = ((scratch_stride + 63) // 64) * 64
+            var scratch_count = max(tasks * scratch_stride, 1)
+            var scratch = alloc(AllocLayout[UInt8](count=scratch_count))
+            execute_serial_or_parallel[Self.Operation, *Args](
+                self.operation,
+                tensors,
+                plan,
+                policy,
+                Int(scratch.unsafe_ptr()),
+                scratch_stride,
+                scratch_offsets,
+            )
+            dealloc(scratch^)
+            return
+
+        execute_serial_or_parallel[Self.Operation, *Args](
+            self.operation,
+            tensors,
+            plan,
+            policy,
+            0,
+            0,
+            scratch_offsets,
+        )

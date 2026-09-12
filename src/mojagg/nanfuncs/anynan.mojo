@@ -1,67 +1,46 @@
-"""Any-NaN predicate: SIMD block checks with slice-wide early termination.
-
-The shared scanner stops before loading the next vector after a NaN.
-The axis driver stops the MULTI odometer too, but still computes every
-independent output slice. Integer results depend only on slice length:
-empty is False, nonempty is False (always False, integers cannot be NaN).
-"""
+"""NaN-aware any predicate for one prepared contiguous core."""
 
 from std.math import isnan
+from std.sys.info import simd_width_of
 
-from mojagg.core.reduce1d import NaNReduction1D, ReductionWidth
+from mojagg.core.tensor_view import TensorArg
+from mojagg.drivers.gufunc import GUFuncOperation
 
 
-struct AnyNan[dtype: DType](NaNReduction1D):
-    comptime value_dtype = Self.dtype
-    comptime out_dtype = DType.bool
-    comptime State = Scalar[DType.bool]
-    comptime Out = Self.State
-    comptime Acc = Self.State
-    comptime block_lanes = ReductionWidth[Self.dtype].block_lanes
-    comptime SHORT_CIRCUIT = Self.dtype.is_floating_point()
+@fieldwise_init
+struct AnyNan[dtype: DType](GUFuncOperation, ImplicitlyCopyable):
+    """Write whether at least one value in the active core is NaN."""
 
-    def __init__(out self):
-        pass
+    comptime Tensors = Tuple[
+        TensorArg[Self.dtype, False],
+        TensorArg[DType.bool, True],
+    ]
 
-    @staticmethod
-    def identity() -> Self.State:
-        return Self.State(False)
+    @always_inline
+    def apply(mut self, tensors: Self.Tensors):
+        var input = tensors[0].copy()
+        var output = tensors[1].copy()
+        var values = input.read_span()
+        var result = False
+        var n = len(values)
 
-    @staticmethod
-    def acc_init() -> Self.Acc:
-        return Self.identity()
-
-    @staticmethod
-    def step_scalar(state: Self.State, value: Scalar[Self.dtype]) -> Self.State:
         comptime if Self.dtype.is_floating_point():
-            return state | isnan(value)
+            comptime width = simd_width_of[Self.dtype]() * 8
+            var pointer = values.unsafe_ptr()
+            var i = 0
+            while i + width <= n and not result:
+                var block = pointer.unsafe_load[width=width](i)
+                if isnan(block).reduce_or():
+                    result = True
+                    break
+                i += width
+            while i < n and not result:
+                if isnan(pointer[unsafe_offset=i]):
+                    result = True
+                    break
+                i += 1
         else:
-            return Self.State(False)
+            # Integer values cannot be NaN.
+            result = False
 
-    @staticmethod
-    def step_simd(
-        mut acc: Self.Acc, values: SIMD[Self.dtype, Self.block_lanes]
-    ):
-        comptime if Self.dtype.is_floating_point():
-            acc |= isnan(values).reduce_or()
-        else:
-            acc = Self.State(False)
-
-    @staticmethod
-    def step_tail[lane: Int](mut acc: Self.Acc, value: Scalar[Self.dtype]):
-        acc = Self.step_scalar(acc, value)
-
-    @staticmethod
-    def collapse(acc: Self.Acc) -> Self.State:
-        return acc
-
-    @staticmethod
-    def is_terminal(state: Self.State) -> Bool:
-        return Bool(state)
-
-    @staticmethod
-    def combine(acc: Self.State, partial: Self.State) -> Self.State:
-        return acc | partial
-
-    def finalize(self, state: Self.State) -> Self.Out:
-        return state
+        output.write_span()[0] = Scalar[DType.bool](result)

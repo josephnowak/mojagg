@@ -52,7 +52,7 @@ Issues = "https://github.com/josephnowak/mojagg/issues"
 include-package-data = true
 
 [tool.setuptools.package-data]
-mojagg = ["*.so", "*.pyd"]
+mojagg = ["*.so", "*.pyd", "*.dylib"]
 
 [tool.setuptools.packages.find]
 where = ["python"]

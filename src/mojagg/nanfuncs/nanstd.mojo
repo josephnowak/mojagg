@@ -7,4 +7,4 @@ the final square-root operation.
 from mojagg.nanfuncs.nanvar import NanVar
 
 
-comptime NanStd = NanVar
+comptime NanStd[dtype: DType] = NanVar[dtype, True]
