@@ -1,19 +1,30 @@
-"""Python bindings for the nanfuncs family — THIN layer.
+"""Python bindings for the nanfuncs family.
 
-One native call handles all axes and layouts through gufunc driver. The facade
-normalizes axes and allocates output; these bindings validate dtype/metadata
-and borrow pointers without copying. Operations implement GUFuncKernel or
-Reduction1D directly.
+The binding validates the Python boundary once, borrows NumPy storage into
+typed ``LayoutTensor`` views, and invokes the canonical tuple-based GUFunc.
+All axis traversal, scratch materialization, and scheduling happen in Mojo.
 """
 
-from std.collections import Span
 from std.os import abort
-from std.python import Python, PythonObject
+from std.python import PythonObject
 from std.python.bindings import PythonModuleBuilder
 
-from mojagg.core.ndview import DimArray, MAX_NDIM, NDView, _dtype_name
-from mojagg.drivers.gufunc import apply_gufunc
-from mojagg.nanfuncs.fill import BFill, FFill
+from mojagg.core.tensor_view import (
+    DimArray as TensorDimArray,
+    MAX_RANK,
+    TensorArg,
+    _dtype_name,
+)
+from mojagg.python.tensor_view_binding import (
+    read_tensor_from_numpy,
+    write_tensor_from_numpy,
+)
+from mojagg.drivers.gufunc import (
+    DispatchPolicy,
+    GUFunc,
+    GUFuncOperation,
+)
+from mojagg.nanfuncs.fill import FillKernel
 from mojagg.nanfuncs.allnan import AllNan
 from mojagg.nanfuncs.anynan import AnyNan
 from mojagg.nanfuncs.nanargmax import NanArgMax
@@ -22,13 +33,12 @@ from mojagg.nanfuncs.nancount import NanCount
 from mojagg.nanfuncs.nanmatrix import (
     NanCorrOp,
     NanCovOp,
-    matrix_batch,
 )
 from mojagg.nanfuncs.nanmax import NanMax
 from mojagg.nanfuncs.nanmean import NanMean
 from mojagg.nanfuncs.nanmin import NanMin
 from mojagg.nanfuncs.nanprod import NanProd
-from mojagg.nanfuncs.nanquantile import nanquantile_driver
+from mojagg.nanfuncs.nanquantile import NanQuantileKernel
 from mojagg.nanfuncs.nansum import NanSum
 from mojagg.nanfuncs.nanvar import NanVar
 
@@ -51,34 +61,132 @@ def _cfg_params(cfg: PythonObject) raises -> Tuple[Int, Int]:
         return (Int(py=cfg), 0)
 
 
-def _out_addr[
-    out_dtype: DType
-](out_arr: PythonObject, op: String) raises -> Int:
-    """Validate the preallocated output array's dtype, return its address.
-
-    Drivers store the address as an `Int` (struct fields cannot expose
-    MutAnyOrigin pointers) and reconstitute the typed pointer on demand.
-    """
-    comptime want = _dtype_name[out_dtype]()
-    var got = String(py=out_arr.dtype.name)
-    if got != want:
-        raise Error(op + ": output must be " + want + ", got " + got)
-    return Int(py=out_arr.ctypes.data)
-
-
 def _axes_from_py(
     axes: PythonObject, op: String
-) raises -> Tuple[DimArray, Int]:
-    """Read a normalized axes tuple into a stack array (ndim <= MAX_NDIM)."""
+) raises -> Tuple[TensorDimArray, Int]:
+    """Read a normalized axes tuple into a fixed-capacity stack array."""
     var k = Int(py=axes.__len__())
-    if k < 1 or k > MAX_NDIM:
+    if k < 1 or k > MAX_RANK:
         raise Error(
-            op + ": expected 1.." + String(MAX_NDIM) + " axes, got " + String(k)
+            op + ": expected 1.." + String(MAX_RANK) + " axes, got " + String(k)
         )
-    var ax = DimArray(fill=0)
+    var ax = TensorDimArray(fill=0)
     for i in range(k):
         ax[i] = Int(py=axes[i])
     return (ax^, k)
+
+
+def _validate_dtype[dtype: DType](arr: PythonObject, op: String) raises:
+    var expected = _dtype_name[dtype]()
+    var actual = String(py=arr.dtype.name)
+    if expected != actual:
+        raise Error(op + ": expected dtype " + expected + ", got " + actual)
+
+
+def _validate_output_dtype[dtype: DType](arr: PythonObject, op: String) raises:
+    """Validate a caller-provided output with an output-specific diagnostic."""
+
+    var expected = _dtype_name[dtype]()
+    var actual = String(py=arr.dtype.name)
+    if expected != actual:
+        raise Error(op + ": output must be " + expected + ", got " + actual)
+
+
+def _apply_reduction[
+    value_dtype: DType,
+    out_dtype: DType,
+    Op: GUFuncOperation,
+](
+    arr: PythonObject,
+    axes: PythonObject,
+    out_arr: PythonObject,
+    cfg: PythonObject,
+    operation: Op,
+    op_name: String,
+) raises -> PythonObject:
+    """Run one concrete tuple operation over normalized reduction axes."""
+
+    _validate_dtype[value_dtype](arr, op_name)
+    _validate_output_dtype[out_dtype](out_arr, op_name)
+    var input_tensor = read_tensor_from_numpy[value_dtype](arr)
+    var output_tensor = write_tensor_from_numpy[out_dtype](out_arr)
+    var input_ndim = Int(py=arr.ndim)
+    var output_ndim = Int(py=out_arr.ndim)
+    var parsed = _axes_from_py(axes, op_name)
+    var tensors = Tuple(
+        TensorArg[value_dtype, False].from_read_tensor(
+            input_tensor,
+            input_ndim,
+            Int(py=arr.ctypes.data),
+        ),
+        TensorArg[out_dtype, True].from_write_tensor(
+            output_tensor,
+            output_ndim,
+            Int(py=out_arr.ctypes.data),
+        ),
+    )
+    var driver = GUFunc[Op](operation)
+    var output_axes = TensorDimArray(fill=0)
+    driver.execute(
+        tensors,
+        parsed[0],
+        parsed[1],
+        output_axes,
+        0,
+        _policy(cfg),
+    )
+    return out_arr
+
+
+def _apply_matrix[
+    value_dtype: DType,
+    Op: GUFuncOperation,
+](
+    arr: PythonObject,
+    out_arr: PythonObject,
+    n_vars: Int,
+    n_obs: Int,
+    policy: DispatchPolicy,
+    operation: Op,
+    op_name: String,
+) raises -> PythonObject:
+    """Run one matrix operation over the two trailing core axes."""
+
+    _validate_dtype[value_dtype](arr, op_name)
+    _validate_output_dtype[value_dtype](out_arr, op_name)
+    var input_tensor = read_tensor_from_numpy[value_dtype](arr)
+    var output_tensor = write_tensor_from_numpy[value_dtype](out_arr)
+    var input_ndim = Int(py=arr.ndim)
+    var output_ndim = Int(py=out_arr.ndim)
+    if input_ndim < 2 or output_ndim < 2:
+        raise Error(op_name + " requires at least two dimensions")
+
+    var input_axes = TensorDimArray(fill=0)
+    input_axes[0] = input_ndim - 2
+    input_axes[1] = input_ndim - 1
+    var output_axes = TensorDimArray(fill=0)
+    output_axes[0] = output_ndim - 2
+    output_axes[1] = output_ndim - 1
+    var tensors = Tuple(
+        TensorArg[value_dtype, False].from_read_tensor(
+            input_tensor,
+            input_ndim,
+            Int(py=arr.ctypes.data),
+        ),
+        TensorArg[value_dtype, True].from_write_tensor(
+            output_tensor,
+            output_ndim,
+            Int(py=out_arr.ctypes.data),
+        ),
+    )
+    var driver = GUFunc[Op](operation)
+    driver.execute(tensors, input_axes, 2, output_axes, 2, policy)
+    return out_arr
+
+
+def _policy(cfg: PythonObject) raises -> DispatchPolicy:
+    var values = _cfg_params(cfg)
+    return DispatchPolicy(values[1], values[0])
 
 
 def allnan_binding[
@@ -90,13 +198,9 @@ def allnan_binding[
     threshold: PythonObject,
 ) raises -> PythonObject:
     """Allnan over `axes` of an N-D array — one FFI call, zero copies."""
-    var view = NDView[dtype].from_numpy(arr, "allnan")
-    var t = _axes_from_py(axes, "allnan")
-    var out_addr = _out_addr[DType.bool](out_arr, "allnan")
-    var op = AllNan[dtype]()
-    var cfg_p = _cfg_params(threshold)
-    apply_gufunc(op, view, t[0], t[1], out_addr, cfg_p[0], cfg_p[1])
-    return out_arr
+    return _apply_reduction[dtype, DType.bool, AllNan[dtype]](
+        arr, axes, out_arr, threshold, AllNan[dtype](), "allnan"
+    )
 
 
 def anynan_binding[
@@ -108,13 +212,9 @@ def anynan_binding[
     threshold: PythonObject,
 ) raises -> PythonObject:
     """AnyNan over `axes` of an N-D array — one FFI call, zero copies."""
-    var view = NDView[dtype].from_numpy(arr, "anynan")
-    var t = _axes_from_py(axes, "anynan")
-    var out_addr = _out_addr[DType.bool](out_arr, "anynan")
-    var op = AnyNan[dtype]()
-    var cfg_p = _cfg_params(threshold)
-    apply_gufunc(op, view, t[0], t[1], out_addr, cfg_p[0], cfg_p[1])
-    return out_arr
+    return _apply_reduction[dtype, DType.bool, AnyNan[dtype]](
+        arr, axes, out_arr, threshold, AnyNan[dtype](), "anynan"
+    )
 
 
 def nansum_binding[
@@ -125,14 +225,14 @@ def nansum_binding[
     out_arr: PythonObject,
     threshold: PythonObject,
 ) raises -> PythonObject:
-    """NanSum over `axes` of an N-D array — one FFI call, zero copies."""
-    var view = NDView[dtype].from_numpy(arr, "nansum")
-    var t = _axes_from_py(axes, "nansum")
-    var out_addr = _out_addr[dtype](out_arr, "nansum")
-    var op = NanSum[dtype]()
-    var cfg_p = _cfg_params(threshold)
-    apply_gufunc(op, view, t[0], t[1], out_addr, cfg_p[0], cfg_p[1])
-    return out_arr
+    return _apply_reduction[dtype, dtype, NanSum[dtype]](
+        arr,
+        axes,
+        out_arr,
+        threshold,
+        NanSum[dtype](),
+        "nansum",
+    )
 
 
 def nanmean_binding[
@@ -144,13 +244,9 @@ def nanmean_binding[
     threshold: PythonObject,
 ) raises -> PythonObject:
     """NanMean over axes, merging sum/count before final division."""
-    var view = NDView[dtype].from_numpy(arr, "nanmean")
-    var t = _axes_from_py(axes, "nanmean")
-    var out_addr = _out_addr[dtype](out_arr, "nanmean")
-    var op = NanMean[dtype]()
-    var cfg_p = _cfg_params(threshold)
-    apply_gufunc(op, view, t[0], t[1], out_addr, cfg_p[0], cfg_p[1])
-    return out_arr
+    return _apply_reduction[dtype, dtype, NanMean[dtype]](
+        arr, axes, out_arr, threshold, NanMean[dtype](), "nanmean"
+    )
 
 
 def nanprod_binding[
@@ -162,13 +258,9 @@ def nanprod_binding[
     threshold: PythonObject,
 ) raises -> PythonObject:
     """NanProd over `axes` of an N-D array — one FFI call, zero copies."""
-    var view = NDView[dtype].from_numpy(arr, "nanprod")
-    var t = _axes_from_py(axes, "nanprod")
-    var out_addr = _out_addr[dtype](out_arr, "nanprod")
-    var op = NanProd[dtype]()
-    var cfg_p = _cfg_params(threshold)
-    apply_gufunc(op, view, t[0], t[1], out_addr, cfg_p[0], cfg_p[1])
-    return out_arr
+    return _apply_reduction[dtype, dtype, NanProd[dtype]](
+        arr, axes, out_arr, threshold, NanProd[dtype](), "nanprod"
+    )
 
 
 def nanmin_binding[
@@ -181,13 +273,14 @@ def nanmin_binding[
     threshold: PythonObject,
 ) raises -> PythonObject:
     """NanMin over `axes` of an N-D array — one FFI call, zero copies."""
-    var view = NDView[dtype].from_numpy(arr, "nanmin")
-    var t = _axes_from_py(axes, "nanmin")
-    var out_addr = _out_addr[result_dtype](out_arr, "nanmin")
-    var op = NanMin[dtype, result_dtype]()
-    var cfg_p = _cfg_params(threshold)
-    apply_gufunc(op, view, t[0], t[1], out_addr, cfg_p[0], cfg_p[1])
-    return out_arr
+    return _apply_reduction[dtype, result_dtype, NanMin[dtype, result_dtype]](
+        arr,
+        axes,
+        out_arr,
+        threshold,
+        NanMin[dtype, result_dtype](),
+        "nanmin",
+    )
 
 
 def nanmax_binding[
@@ -200,13 +293,14 @@ def nanmax_binding[
     threshold: PythonObject,
 ) raises -> PythonObject:
     """NanMax over `axes` of an N-D array — one FFI call, zero copies."""
-    var view = NDView[dtype].from_numpy(arr, "nanmax")
-    var t = _axes_from_py(axes, "nanmax")
-    var out_addr = _out_addr[result_dtype](out_arr, "nanmax")
-    var op = NanMax[dtype, result_dtype]()
-    var cfg_p = _cfg_params(threshold)
-    apply_gufunc(op, view, t[0], t[1], out_addr, cfg_p[0], cfg_p[1])
-    return out_arr
+    return _apply_reduction[dtype, result_dtype, NanMax[dtype, result_dtype]](
+        arr,
+        axes,
+        out_arr,
+        threshold,
+        NanMax[dtype, result_dtype](),
+        "nanmax",
+    )
 
 
 def nanargmin_binding[
@@ -218,13 +312,9 @@ def nanargmin_binding[
     threshold: PythonObject,
 ) raises -> PythonObject:
     """NanArgMin over `axes` of an N-D array — one FFI call, zero copies."""
-    var view = NDView[dtype].from_numpy(arr, "nanargmin")
-    var t = _axes_from_py(axes, "nanargmin")
-    var out_addr = _out_addr[DType.int64](out_arr, "nanargmin")
-    var op = NanArgMin[dtype]()
-    var cfg_p = _cfg_params(threshold)
-    apply_gufunc(op, view, t[0], t[1], out_addr, cfg_p[0], cfg_p[1])
-    return out_arr
+    return _apply_reduction[dtype, DType.int64, NanArgMin[dtype]](
+        arr, axes, out_arr, threshold, NanArgMin[dtype](), "nanargmin"
+    )
 
 
 def nanargmax_binding[
@@ -236,13 +326,9 @@ def nanargmax_binding[
     threshold: PythonObject,
 ) raises -> PythonObject:
     """NanArgMax over `axes` of an N-D array — one FFI call, zero copies."""
-    var view = NDView[dtype].from_numpy(arr, "nanargmax")
-    var t = _axes_from_py(axes, "nanargmax")
-    var out_addr = _out_addr[DType.int64](out_arr, "nanargmax")
-    var op = NanArgMax[dtype]()
-    var cfg_p = _cfg_params(threshold)
-    apply_gufunc(op, view, t[0], t[1], out_addr, cfg_p[0], cfg_p[1])
-    return out_arr
+    return _apply_reduction[dtype, DType.int64, NanArgMax[dtype]](
+        arr, axes, out_arr, threshold, NanArgMax[dtype](), "nanargmax"
+    )
 
 
 def nanvar_binding[
@@ -259,21 +345,15 @@ def nanvar_binding[
     var op = "nanstd"
     comptime if not take_sqrt:
         op = "nanvar"
-    var view = NDView[dtype].from_numpy(arr, op)
-    var t = _axes_from_py(axes, op)
-    var out_addr = _out_addr[dtype](out_arr, op)
     var kernel = NanVar[dtype, take_sqrt](ddof=Int(py=ddof))
-    var cfg_p = _cfg_params(threshold)
-    apply_gufunc(
+    return _apply_reduction[dtype, dtype, NanVar[dtype, take_sqrt]](
+        arr,
+        axes,
+        out_arr,
+        threshold,
         kernel,
-        view,
-        t[0],
-        t[1],
-        out_addr,
-        cfg_p[0],
-        cfg_p[1],
+        op,
     )
-    return out_arr
 
 
 def nancount_binding[
@@ -285,12 +365,50 @@ def nancount_binding[
     threshold: PythonObject,
 ) raises -> PythonObject:
     """NanCount over `axes` of an N-D array — one FFI call, zero copies."""
-    var view = NDView[dtype].from_numpy(arr, "nancount")
-    var t = _axes_from_py(axes, "nancount")
-    var out_addr = _out_addr[DType.int64](out_arr, "nancount")
-    var op = NanCount[dtype]()
-    var cfg_p = _cfg_params(threshold)
-    apply_gufunc(op, view, t[0], t[1], out_addr, cfg_p[0], cfg_p[1])
+    return _apply_reduction[dtype, DType.int64, NanCount[dtype]](
+        arr, axes, out_arr, threshold, NanCount[dtype](), "nancount"
+    )
+
+
+def _apply_fill[
+    dtype: DType, backward: Bool
+](
+    arr: PythonObject,
+    axes: PythonObject,
+    out_arr: PythonObject,
+    limit: PythonObject,
+    cfg: PythonObject,
+    op_name: String,
+) raises -> PythonObject:
+    _validate_dtype[dtype](arr, op_name)
+    _validate_output_dtype[dtype](out_arr, op_name)
+    var input_tensor = read_tensor_from_numpy[dtype](arr)
+    var output_tensor = write_tensor_from_numpy[dtype](out_arr)
+    var input_ndim = Int(py=arr.ndim)
+    var output_ndim = Int(py=out_arr.ndim)
+    var parsed = _axes_from_py(axes, op_name)
+    var tensors = Tuple(
+        TensorArg[dtype, False].from_read_tensor(
+            input_tensor,
+            input_ndim,
+            Int(py=arr.ctypes.data),
+        ),
+        TensorArg[dtype, True].from_write_tensor(
+            output_tensor,
+            output_ndim,
+            Int(py=out_arr.ctypes.data),
+        ),
+    )
+    var operation = FillKernel[dtype, backward](limit=Int(py=limit))
+    var driver = GUFunc[FillKernel[dtype, backward]](operation)
+    driver.execute(
+        tensors,
+        parsed[0],
+        parsed[1],
+        parsed[0],
+        parsed[1],
+        _policy(cfg),
+    )
     return out_arr
 
 
@@ -303,21 +421,9 @@ def ffill_binding[
     limit: PythonObject,
     threshold: PythonObject,
 ) raises -> PythonObject:
-    var view = NDView[dtype].from_numpy(arr, "ffill")
-    var out_view = NDView[dtype].from_numpy(out_arr, "ffill")
-    var t = _axes_from_py(axes, "ffill")
-    var op = FFill[dtype](limit=Int(py=limit))
-    var cfg_p = _cfg_params(threshold)
-    apply_gufunc(
-        op,
-        view,
-        out_view,
-        t[0],
-        t[1],
-        cfg_p[0],
-        cfg_p[1],
+    return _apply_fill[dtype, False](
+        arr, axes, out_arr, limit, threshold, "ffill"
     )
-    return out_arr
 
 
 def bfill_binding[
@@ -329,21 +435,9 @@ def bfill_binding[
     limit: PythonObject,
     threshold: PythonObject,
 ) raises -> PythonObject:
-    var view = NDView[dtype].from_numpy(arr, "bfill")
-    var out_view = NDView[dtype].from_numpy(out_arr, "bfill")
-    var t = _axes_from_py(axes, "bfill")
-    var op = BFill[dtype](limit=Int(py=limit))
-    var cfg_p = _cfg_params(threshold)
-    apply_gufunc(
-        op,
-        view,
-        out_view,
-        t[0],
-        t[1],
-        cfg_p[0],
-        cfg_p[1],
+    return _apply_fill[dtype, True](
+        arr, axes, out_arr, limit, threshold, "bfill"
     )
-    return out_arr
 
 
 def nancovmatrix_binding[
@@ -357,18 +451,22 @@ def nancovmatrix_binding[
     threshold: PythonObject,
     workers: PythonObject,
 ) raises -> PythonObject:
-    var src_addr = Int(py=arr.ctypes.data)
-    var dst_addr = Int(py=out_arr.ctypes.data)
-    matrix_batch[NanCovOp[dtype]](
-        src_addr,
-        dst_addr,
-        Int(py=batch),
+    if Int(py=batch) == 0:
+        return out_arr
+    var policy = DispatchPolicy(Int(py=workers), Int(py=threshold))
+    var operation = NanCovOp[dtype](
         Int(py=n_vars),
         Int(py=n_obs),
-        Int(py=threshold),
-        Int(py=workers),
     )
-    return out_arr
+    return _apply_matrix[dtype, NanCovOp[dtype]](
+        arr,
+        out_arr,
+        Int(py=n_vars),
+        Int(py=n_obs),
+        policy,
+        operation,
+        "nancovmatrix",
+    )
 
 
 def nancorrmatrix_binding[
@@ -382,18 +480,22 @@ def nancorrmatrix_binding[
     threshold: PythonObject,
     workers: PythonObject,
 ) raises -> PythonObject:
-    var src_addr = Int(py=arr.ctypes.data)
-    var dst_addr = Int(py=out_arr.ctypes.data)
-    matrix_batch[NanCorrOp[dtype]](
-        src_addr,
-        dst_addr,
-        Int(py=batch),
+    if Int(py=batch) == 0:
+        return out_arr
+    var policy = DispatchPolicy(Int(py=workers), Int(py=threshold))
+    var operation = NanCorrOp[dtype](
         Int(py=n_vars),
         Int(py=n_obs),
-        Int(py=threshold),
-        Int(py=workers),
     )
-    return out_arr
+    return _apply_matrix[dtype, NanCorrOp[dtype]](
+        arr,
+        out_arr,
+        Int(py=n_vars),
+        Int(py=n_obs),
+        policy,
+        operation,
+        "nancorrmatrix",
+    )
 
 
 def nanquantile_binding[
@@ -405,21 +507,39 @@ def nanquantile_binding[
     out_arr: PythonObject,
     cfg: PythonObject,
 ) raises -> PythonObject:
-    var view = NDView[dtype].from_numpy(arr, "nanquantile")
+    _validate_dtype[dtype](arr, "nanquantile")
+    _validate_output_dtype[dtype](out_arr, "nanquantile")
+    var input_tensor = read_tensor_from_numpy[dtype](arr)
+    var output_tensor = write_tensor_from_numpy[dtype](out_arr)
+    var input_ndim = Int(py=arr.ndim)
+    var output_ndim = Int(py=out_arr.ndim)
     var t = _axes_from_py(axes, "nanquantile")
     var q_addr = Int(py=quantiles_arr.ctypes.data)
     var num_q = Int(py=quantiles_arr.__len__())
-    var out_addr = _out_addr[dtype](out_arr, "nanquantile")
-    var cfg_p = _cfg_params(cfg)
-    nanquantile_driver[dtype](
-        view,
+    var policy = _policy(cfg)
+    var tensors = Tuple(
+        TensorArg[dtype, False].from_read_tensor(
+            input_tensor,
+            input_ndim,
+            Int(py=arr.ctypes.data),
+        ),
+        TensorArg[dtype, True].from_write_tensor(
+            output_tensor,
+            output_ndim,
+            Int(py=out_arr.ctypes.data),
+        ),
+    )
+    var operation = NanQuantileKernel[dtype](q_addr, num_q)
+    var driver = GUFunc[NanQuantileKernel[dtype]](operation)
+    var output_axes = TensorDimArray(fill=0)
+    output_axes[0] = output_ndim - 1
+    driver.execute(
+        tensors,
         t[0],
         t[1],
-        q_addr,
-        num_q,
-        out_addr,
-        cfg_p[0],
-        cfg_p[1],
+        output_axes,
+        1,
+        policy,
     )
     return out_arr
 

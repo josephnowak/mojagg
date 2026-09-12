@@ -33,10 +33,26 @@ _REGISTERED_NAMES = [
     "ffill",
     "nancorrmatrix",
     "nancovmatrix",
+    "group_nancount",
+    "group_nanall",
+    "group_nanany",
+    "group_nanargmax",
+    "group_nanargmin",
+    "group_nanfirst",
+    "group_nanlast",
+    "group_nanmax",
+    "group_nanmean",
+    "group_nanmin",
+    "group_nanprod",
+    "group_nanstd",
+    "group_nansum",
+    "group_nansum_of_squares",
+    "group_nanvar",
 ]
 
 _ORIGINAL_NUMBAGG: dict[str, Any] = {}
 _ORIGINAL_FUNCS: dict[str, Any] = {}
+_ORIGINAL_GROUPED: dict[str, Any] = {}
 _ORIGINAL_LISTS: dict[str, list[Any]] = {}
 _COMPARISONS_BY_NAME: dict[str, Any] = {}
 _IS_REGISTERED = False
@@ -85,8 +101,24 @@ def register(target: Any = None) -> None:
     except Exception:
         pass
 
+    # Patch numbagg.grouped for the grouped upstream tests and consumers.
+    try:
+        import numbagg.grouped as grouped_mod
+
+        for name in _REGISTERED_NAMES:
+            if hasattr(mojagg, name) and hasattr(grouped_mod, name):
+                _ORIGINAL_GROUPED[name] = getattr(grouped_mod, name)
+                setattr(grouped_mod, name, getattr(mojagg, name))
+    except Exception:
+        pass
+
     # Patch collection lists
-    for list_name in ("AGGREGATION_FUNCS", "OTHER_FUNCS", "MATRIX_FUNCS"):
+    for list_name in (
+        "AGGREGATION_FUNCS",
+        "GROUPED_FUNCS",
+        "OTHER_FUNCS",
+        "MATRIX_FUNCS",
+    ):
         if hasattr(target, list_name):
             target_list = getattr(target, list_name)
             _ORIGINAL_LISTS[list_name] = list(target_list)
@@ -144,6 +176,11 @@ def unregister() -> None:
         for name, fn in _ORIGINAL_FUNCS.items():
             setattr(funcs_mod, name, fn)
 
+    if "numbagg.grouped" in sys.modules:
+        grouped_mod = sys.modules["numbagg.grouped"]
+        for name, fn in _ORIGINAL_GROUPED.items():
+            setattr(grouped_mod, name, fn)
+
     if "numbagg.test.conftest" in sys.modules:
         conftest = sys.modules["numbagg.test.conftest"]
         if hasattr(conftest, "COMPARISONS"):
@@ -159,6 +196,7 @@ def unregister() -> None:
 
     _ORIGINAL_NUMBAGG.clear()
     _ORIGINAL_FUNCS.clear()
+    _ORIGINAL_GROUPED.clear()
     _ORIGINAL_LISTS.clear()
     _IS_REGISTERED = False
 

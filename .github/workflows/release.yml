@@ -57,7 +57,12 @@ jobs:
 
   build:
     needs: prepare
-    runs-on: ubuntu-latest
+    runs-on: ${{ matrix.os }}
+    strategy:
+      fail-fast: false
+      matrix:
+        os: [ubuntu-latest, macos-latest, ubuntu-24.04-arm]
+        environment: ["py310", "py311", "py312", "py313", "py314"]
     steps:
       - uses: actions/checkout@v7
         with:
@@ -65,30 +70,40 @@ jobs:
 
       - name: Sync pyproject version
         run: |
-          sed -i -E "s/^version = \".*\"/version = \"${{ needs.prepare.outputs.version }}\"/" pyproject.toml
+          if [ "${{ runner.os }}" = "macOS" ]; then
+            sed -i '' -E "s/^version = \".*\"/version = \"${{ needs.prepare.outputs.version }}\"/" pyproject.toml
+          else
+            sed -i -E "s/^version = \".*\"/version = \"${{ needs.prepare.outputs.version }}\"/" pyproject.toml
+          fi
 
       - name: Set up pixi
         uses: prefix-dev/setup-pixi@v0.10.2
         with:
           cache: true
+          environments: ${{ matrix.environment }}
+          activate-environment: ${{ matrix.environment }}
 
       - name: Build wheel
-        run: pixi run build-wheel
+        run: pixi run -e ${{ matrix.environment }} build-wheel
 
-      - name: Repair linux wheel
+      - name: Repair wheel
         run: |
           mkdir -p dist/repaired
-          pixi run auditwheel repair dist/*.whl -w dist/repaired
+          if [ "${{ runner.os }}" = "Linux" ]; then
+            pixi run -e ${{ matrix.environment }} auditwheel repair dist/*.whl -w dist/repaired
+          elif [ "${{ runner.os }}" = "macOS" ]; then
+            pixi run -e ${{ matrix.environment }} delocate-wheel -w dist/repaired -v dist/*.whl
+          fi
 
       - name: Smoke-test the built wheel
         run: |
           WHEEL=$(ls dist/repaired/*.whl 2>/dev/null || ls dist/*.whl)
-          pixi run python -m pip install --force-reinstall "$WHEEL"
-          pixi run python -c "import mojagg, numpy as np; a=np.arange(10,dtype=np.float64); a[3]=np.nan; print('smoke:', mojagg.nansum(a))"
+          pixi run -e ${{ matrix.environment }} python -m pip install --force-reinstall "$WHEEL"
+          pixi run -e ${{ matrix.environment }} python -c "import mojagg, numpy as np; a=np.arange(10,dtype=np.float64); a[3]=np.nan; print('smoke:', mojagg.nansum(a))"
 
       - uses: actions/upload-artifact@v7
         with:
-          name: wheels
+          name: wheels-${{ matrix.os }}-${{ matrix.environment }}
           path: dist/repaired/*.whl
 
   sdist:

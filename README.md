@@ -60,48 +60,32 @@ development measurements, not native-Linux dispatch calibration.
 
 Run them: `python benchmarks/full_matrix.py` · Continuous per-PR performance tracking via [CodSpeed](https://codspeed.io).
 
-### Reduction development
+### GUFunc driver
 
-`allnan`, `nansum` and `nanmean` implement `NaNReduction1D` in
-`src/mojagg/core/reduce1d.mojo`. Shared scanners handle contiguous SIMD and
-scalar strides; the axis driver merges partial states and finalizes once per
-output slice. Native vector width and arithmetic accumulator-chain count are
-separate. Sum retains its eight-chain EVL accumulator and scalar strided sum.
+Every nanfunc operation declares one fixed-arity native Mojo tuple and exposes
+only `apply(tensors)`. For example, a reduction declares
+`Tuple[TensorArg[dtype, False], TensorArg[out_dtype, True]]`. Dtypes and
+read/write capabilities are compile-time specializations; there is no boxed
+runtime dtype dispatch. `TensorTuple` is only an alias for Mojo's native
+`Tuple[*Args]`, not a wrapper.
 
-`allnan` checks `isnan(values).reduce_and()` after each native-width block.
-Its terminal state also stops the multi-axis odometer, never other output
-slices. Compile-time capabilities erase those checks for sum and bypass input
-traversal entirely for integer `allnan`. Other reductions pass `HookReduction`
-explicitly to the same `reduce_axis[Op: Reduction1D]` entry point. There is no
-legacy four-hook overload. `HookReduction` describes a result-valued operation;
-the axis driver still owns N-D planning, slice traversal and parallelism.
+`GUFunc` validates ranks, outer shapes, selected axes, and output layout once.
+It then walks the outer index space in Mojo and passes each operation a
+one-dimensional core. A read core whose selected axes are not contiguous is
+copied into one preallocated scratch slot per worker. Contiguous reads are
+borrowed directly, and writable tensors always point at the caller's
+C-contiguous output, so no output copy-back is needed. Operation-owned
+temporary workspaces are held by the operation and copied once per worker.
 
-`nanmean` carries a float64 sum and int64 valid count through both scanners
-and multi-axis merging; it divides only at finalization. Empty/all-NaN slices
-return NaN. Float32 input remains zero-copy with a float32 result, but uses
-float64 arithmetic internally to match numbagg (including finite values whose
-float32 sum would overflow). The facade follows the reference's safe-casting
-order: bool/small integers/float16 -> float32; 32/64-bit integers -> float64.
-Unsupported nonnumeric dtypes are rejected instead of coerced.
+`DispatchPolicy` compares the largest read core with the configured inner-loop
+threshold before launching `parallelize`, and caps workers at the number of
+outer slices. A single worker or a below-threshold core stays on the serial
+path. This keeps the hot `apply` method independent of ndim, axes, strides,
+scratch management, and scheduling while allowing each operation to use its
+contiguous SIMD implementation.
 
-Mean's width sweep is reproducible with
-`pixi run mojo run -O3 -I src benchmarks/mean_widths.mojo`. The seven-trial,
-alternating 1/2/4/8-chain comparison selected one chain for float32 and four
-for float64. On the development WSL host, at 100,003 elements their median
-kernel times were 41.5 us and 36.5 us respectively; float64's one-chain
-baseline took 50.1 us. Four float64 chains trade roughly 8 ns on 17-element
-runs for faster long scans. Recalibrate on native hardware before claiming
-portable speedups. Python benchmark rows compare both dtypes against NumPy
-and numbagg.
-
-The local quick public-API comparison was mixed: full 1M-element means took
-about 0.56/0.52 ms (f32/f64) versus numbagg's 6.27/7.88 ms, but float64 tiny
-rows and column reductions remained slower than numbagg (2.44 vs 0.99 ms and
-2.32 vs 1.32 ms respectively). These WSL measurements are not a claim that
-every shape is faster.
-
-Run `pixi run test-mojo` to check actual traversal counts, including parallel
-output independence, and `pixi run test` for Python parity.
+Run `pixi run test-mojo` for the native tuple and scratch-path smoke tests, and
+`pixi run test` for Python parity against numbagg.
 `benchmarks/reduction_contract.py` times the native boundary with allocations
 and reference calculations excluded:
 
@@ -164,6 +148,7 @@ Native reduction kernels instantiate `float64`/`float32`/`int64`/`int32`;
 the facade visibly promotes numbagg-compatible small and integer inputs where
 required. Reduction inputs remain zero-copy, except for documented promotion
 and big-endian normalization.
+Grouped operations expect dense, non-negative factorization labels.
 
 ## Configuration
 

@@ -1,60 +1,62 @@
-"""NaN-skipping product using the shared reduction scanners.
+"""NaN-aware product operation for the native-tuple GUFunc."""
 
-NaNs contribute the multiplicative identity. Integer specializations erase all
-NaN handling at compile time; empty and all-NaN slices therefore return one.
-"""
-
+from std.algorithm import vectorize
+from std.collections import Span
 from std.math import isnan
+from std.sys.info import simd_width_of
 
-from mojagg.core.reduce1d import NaNReduction1D, ReductionWidth
+from mojagg.core.tensor_view import TensorArg
+from mojagg.drivers.gufunc import GUFuncOperation
 
 
-struct NanProd[dtype: DType](NaNReduction1D):
+@always_inline
+def nan_product_contiguous[
+    dtype: DType
+](values: Span[Scalar[dtype], ImmUntrackedOrigin]) -> Scalar[dtype]:
+    """Reduce one contiguous core with a SIMD product accumulator."""
+
+    comptime width = simd_width_of[dtype]() * 8
+    var product = SIMD[dtype, width](1)
+    var one = SIMD[dtype, width](1)
+    var pointer = values.unsafe_ptr()
+
+    def step[
+        vector_width: Int
+    ](i: Int, evl: Int) {imm pointer, mut product, imm one}:
+        if evl == width:
+            var block = pointer.unsafe_load[width=width](i)
+            comptime if dtype.is_floating_point():
+                product *= isnan(block).select(one, block)
+            else:
+                product *= block
+        else:
+            comptime for lane in range(width):
+                if lane < evl:
+                    var value = pointer[unsafe_offset=i + lane]
+                    comptime if dtype.is_floating_point():
+                        if not isnan(value):
+                            product[lane] *= value
+                    else:
+                        product[lane] *= value
+
+    vectorize[width](len(values), step)
+    return product.reduce_mul()
+
+
+@fieldwise_init
+struct NanProd[dtype: DType](GUFuncOperation, ImplicitlyCopyable):
+    """Multiply finite values and use one as the empty/all-NaN identity."""
+
     comptime value_dtype = Self.dtype
     comptime out_dtype = Self.dtype
-    comptime State = Scalar[Self.dtype]
-    comptime block_lanes = ReductionWidth[Self.dtype].block_lanes
-    comptime Acc = SIMD[Self.dtype, Self.block_lanes]
+    comptime Tensors = Tuple[
+        TensorArg[Self.value_dtype, False],
+        TensorArg[Self.out_dtype, True],
+    ]
 
-    @staticmethod
-    def identity() -> Self.State:
-        return Self.State(1)
-
-    @staticmethod
-    def acc_init() -> Self.Acc:
-        return Self.Acc(1)
-
-    @staticmethod
-    def step_scalar(state: Self.State, value: Scalar[Self.dtype]) -> Self.State:
-        comptime if Self.dtype.is_floating_point():
-            if isnan(value):
-                return state
-        return state * value
-
-    @staticmethod
-    def step_simd(
-        mut acc: Self.Acc,
-        values: SIMD[Self.dtype, Self.block_lanes],
-    ):
-        comptime if Self.dtype.is_floating_point():
-            acc *= isnan(values).select(Self.Acc(1), values)
-        else:
-            acc *= values
-
-    @staticmethod
-    def step_tail[lane: Int](mut acc: Self.Acc, value: Scalar[Self.dtype]):
-        acc[lane] = Self.step_scalar(acc[lane], value)
-
-    @staticmethod
-    def collapse(acc: Self.Acc) -> Self.State:
-        return acc.reduce_mul()
-
-    @staticmethod
-    def combine(acc: Self.State, partial: Self.State) -> Self.State:
-        return acc * partial
-
-    def __init__(out self):
-        pass
-
-    def finalize(self, state: Self.State) -> Scalar[Self.out_dtype]:
-        return state
+    @always_inline
+    def apply(mut self, tensors: Self.Tensors):
+        var input = tensors[0].copy()
+        var output = tensors[1].copy()
+        var values = input.read_span()
+        output.write_span()[0] = nan_product_contiguous[Self.dtype](values)

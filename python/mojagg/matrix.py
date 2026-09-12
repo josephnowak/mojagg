@@ -46,9 +46,6 @@ def _matrix_func(arr: Any, is_corr: bool, func_name: str) -> np.ndarray:
     out_shape = batch_shape + (n_vars, n_vars)
     out = np.empty(out_shape, dtype=target_dtype)
 
-    if not a.flags.c_contiguous:
-        a = np.ascontiguousarray(a)
-
     cfg = get_config()
     workers = cfg.threads if cfg.threads > 0 else (os.cpu_count() or 4)
     threshold = cfg.parallel_threshold
