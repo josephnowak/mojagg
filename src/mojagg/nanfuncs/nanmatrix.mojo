@@ -1,4 +1,4 @@
-"""NaN-aware covariance and correlation matrices."""
+"""Shared execution and accumulators for NaN-aware matrix operations."""
 
 from std.algorithm import vectorize
 from std.collections import Span
@@ -38,6 +38,17 @@ struct PairwiseAcc(Copyable):
 
 trait MatrixPairwiseOp:
     comptime out_dtype: DType
+
+    @staticmethod
+    def accumulate(
+        p_i: Pointer[mut=False, Scalar[Self.out_dtype], ImmUntrackedOrigin],
+        p_j: Pointer[mut=False, Scalar[Self.out_dtype], ImmUntrackedOrigin],
+        n_obs: Int,
+        shift_i: Float64,
+        shift_j: Float64,
+        is_diag: Bool,
+    ) -> PairwiseAcc:
+        ...
 
     @staticmethod
     def finalize(acc: PairwiseAcc, is_diag: Bool) -> Scalar[Self.out_dtype]:
@@ -154,23 +165,186 @@ def _accumulate_pair_simd[
 
 
 @always_inline
+def _accumulate_cov_diag_simd[
+    dtype: DType
+](
+    p_i: Pointer[mut=False, Scalar[dtype], ImmUntrackedOrigin],
+    n_obs: Int,
+    shift_i: Float64,
+) -> PairwiseAcc:
+    """Accumulate a covariance diagonal without unused pair accumulators."""
+
+    comptime width = simd_width_of[dtype]()
+    var count = SIMD[DType.float64, width](0.0)
+    var sum_x = SIMD[DType.float64, width](0.0)
+    var sum_xx = SIMD[DType.float64, width](0.0)
+    var zero = SIMD[DType.float64, width](0.0)
+    var one = SIMD[DType.float64, width](1.0)
+    var shift_x = SIMD[DType.float64, width](shift_i)
+
+    def step[
+        vector_width: Int
+    ](i: Int, evl: Int) {
+        imm p_i,
+        mut count,
+        mut sum_x,
+        mut sum_xx,
+        imm zero,
+        imm one,
+        imm shift_x,
+        imm shift_i,
+    }:
+        if evl == width:
+            var raw_x = p_i.unsafe_load[width=width](i)
+            var x = raw_x.cast[DType.float64]()
+            var missing_x = isnan(raw_x)
+            var dx = x - shift_x
+            count += missing_x.select(zero, one)
+            sum_x += missing_x.select(zero, dx)
+            sum_xx += missing_x.select(zero, dx * dx)
+        else:
+            comptime for lane in range(width):
+                if lane < evl:
+                    var raw_x = p_i[unsafe_offset=i + lane]
+                    if not isnan(raw_x):
+                        var dx = Float64(raw_x) - shift_i
+                        count[lane] += 1.0
+                        sum_x[lane] += dx
+                        sum_xx[lane] += dx * dx
+
+    vectorize[width](n_obs, step)
+
+    var acc = PairwiseAcc()
+    acc.count = count.reduce_add()
+    acc.sum_x = sum_x.reduce_add()
+    acc.sum_y = acc.sum_x
+    acc.sum_xx = sum_xx.reduce_add()
+    acc.sum_yy = acc.sum_xx
+    acc.sum_xy = acc.sum_xx
+    return acc^
+
+
+@always_inline
+def _accumulate_cov_offdiag_simd[
+    dtype: DType
+](
+    p_i: Pointer[mut=False, Scalar[dtype], ImmUntrackedOrigin],
+    p_j: Pointer[mut=False, Scalar[dtype], ImmUntrackedOrigin],
+    n_obs: Int,
+    shift_i: Float64,
+    shift_j: Float64,
+) -> PairwiseAcc:
+    """Accumulate covariance off-diagonals with only needed statistics."""
+
+    comptime width = simd_width_of[dtype]()
+    var count = SIMD[DType.float64, width](0.0)
+    var sum_x = SIMD[DType.float64, width](0.0)
+    var sum_y = SIMD[DType.float64, width](0.0)
+    var sum_xy = SIMD[DType.float64, width](0.0)
+    var zero = SIMD[DType.float64, width](0.0)
+    var one = SIMD[DType.float64, width](1.0)
+    var shift_x = SIMD[DType.float64, width](shift_i)
+    var shift_y = SIMD[DType.float64, width](shift_j)
+
+    def step[
+        vector_width: Int
+    ](i: Int, evl: Int) {
+        imm p_i,
+        imm p_j,
+        mut count,
+        mut sum_x,
+        mut sum_y,
+        mut sum_xy,
+        imm zero,
+        imm one,
+        imm shift_x,
+        imm shift_y,
+        imm shift_i,
+        imm shift_j,
+    }:
+        if evl == width:
+            var raw_x = p_i.unsafe_load[width=width](i)
+            var raw_y = p_j.unsafe_load[width=width](i)
+            var x = raw_x.cast[DType.float64]()
+            var y = raw_y.cast[DType.float64]()
+            var missing = isnan(raw_x) | isnan(raw_y)
+            var dx = x - shift_x
+            var dy = y - shift_y
+            count += missing.select(zero, one)
+            sum_x += missing.select(zero, dx)
+            sum_y += missing.select(zero, dy)
+            sum_xy += missing.select(zero, dx * dy)
+        else:
+            comptime for lane in range(width):
+                if lane < evl:
+                    var raw_x = p_i[unsafe_offset=i + lane]
+                    var raw_y = p_j[unsafe_offset=i + lane]
+                    if not isnan(raw_x) and not isnan(raw_y):
+                        var dx = Float64(raw_x) - shift_i
+                        var dy = Float64(raw_y) - shift_j
+                        count[lane] += 1.0
+                        sum_x[lane] += dx
+                        sum_y[lane] += dy
+                        sum_xy[lane] += dx * dy
+
+    vectorize[width](n_obs, step)
+
+    var acc = PairwiseAcc()
+    acc.count = count.reduce_add()
+    acc.sum_x = sum_x.reduce_add()
+    acc.sum_y = sum_y.reduce_add()
+    acc.sum_xy = sum_xy.reduce_add()
+    return acc^
+
+
+@always_inline
+def _accumulate_cov_pair_simd[
+    dtype: DType
+](
+    p_i: Pointer[mut=False, Scalar[dtype], ImmUntrackedOrigin],
+    p_j: Pointer[mut=False, Scalar[dtype], ImmUntrackedOrigin],
+    n_obs: Int,
+    shift_i: Float64,
+    shift_j: Float64,
+    is_diag: Bool,
+) -> PairwiseAcc:
+    """Select the compact covariance reducer for a diagonal or pair."""
+
+    if is_diag:
+        return _accumulate_cov_diag_simd[dtype](p_i, n_obs, shift_i)
+    return _accumulate_cov_offdiag_simd[dtype](
+        p_i, p_j, n_obs, shift_i, shift_j
+    )
+
+
+@always_inline
 def _pair_tile_count(n_vars: Int, tile_size: Int) -> Int:
     var tile_count = (n_vars + tile_size - 1) // tile_size
     return tile_count * (tile_count + 1) // 2
 
 
 @always_inline
-def _pair_tile_coordinates(
-    tile_index: Int, tile_count: Int
-) -> Tuple[Int, Int]:
-    """Map a packed upper-triangle tile index to (row, column)."""
+def _pair_tile_coordinates(tile_index: Int, tile_count: Int) -> Tuple[Int, Int]:
+    """Map a packed upper-triangle tile index to (row, column).
 
-    var row = 0
-    var remaining = tile_index
-    while remaining >= tile_count - row:
-        remaining -= tile_count - row
-        row += 1
-    return (row, row + remaining)
+    The binary search keeps scheduling overhead logarithmic in the number of
+    tiles.  A linear row walk becomes visible for very wide matrices because
+    the packed tile count is quadratic in the variable count.
+    """
+
+    var low = 0
+    var high = tile_count
+    while low < high:
+        var middle = (low + high) // 2
+        var row_start = middle * tile_count - middle * (middle - 1) // 2
+        if row_start <= tile_index:
+            low = middle + 1
+        else:
+            high = middle
+
+    var row = low - 1
+    var row_start = row * tile_count - row * (row - 1) // 2
+    return (row, row + tile_index - row_start)
 
 
 @always_inline
@@ -189,9 +363,9 @@ def _compute_pair_tile[
     var source_ptr = Pointer[
         mut=False, Scalar[Op.out_dtype], ImmUntrackedOrigin
     ](unsafe_from_address=source_address)
-    var destination_ptr = Pointer[
-        mut=True, Scalar[Op.out_dtype], MutAnyOrigin
-    ](unsafe_from_address=destination_address)
+    var destination_ptr = Pointer[mut=True, Scalar[Op.out_dtype], MutAnyOrigin](
+        unsafe_from_address=destination_address
+    )
     var tile_count = (n_vars + tile_size - 1) // tile_size
     var coordinates = _pair_tile_coordinates(tile_index, tile_count)
     var tile_i = coordinates[0]
@@ -203,18 +377,12 @@ def _compute_pair_tile[
 
     for i in range(i_start, i_stop):
         var p_i = source_ptr.unsafe_offset(i * n_obs)
-        var shift_i = Float64(
-            destination_ptr[unsafe_offset=i * n_vars + i]
-        )
+        var shift_i = Float64(destination_ptr[unsafe_offset=i * n_vars + i])
         var first_j = max(j_start, i + 1)
         for j in range(first_j, j_stop):
             var p_j = source_ptr.unsafe_offset(j * n_obs)
-            var shift_j = Float64(
-                destination_ptr[unsafe_offset=j * n_vars + j]
-            )
-            var acc = _accumulate_pair_simd[Op.out_dtype](
-                p_i, p_j, n_obs, shift_i, shift_j, False
-            )
+            var shift_j = Float64(destination_ptr[unsafe_offset=j * n_vars + j])
+            var acc = Op.accumulate(p_i, p_j, n_obs, shift_i, shift_j, False)
             var value = Op.finalize(acc, False)
             destination_ptr[unsafe_offset=i * n_vars + j] = value
             destination_ptr[unsafe_offset=j * n_vars + i] = value
@@ -248,7 +416,9 @@ def _run_pair_tiles[
 
     var chunk = (tile_count + tasks - 1) // tasks
 
-    def worker(index: Int) {
+    def worker(
+        index: Int,
+    ) {
         imm source_address,
         imm destination_address,
         imm n_vars,
@@ -321,7 +491,5 @@ def _nanmatrix_2d_contiguous[
     for i in range(n_vars):
         var p_i = source_ptr.unsafe_offset(i * n_obs)
         var shift_i = Float64(destination_ptr[unsafe_offset=i * n_vars + i])
-        var acc = _accumulate_pair_simd[Op.out_dtype](
-            p_i, p_i, n_obs, shift_i, shift_i, True
-        )
+        var acc = Op.accumulate(p_i, p_i, n_obs, shift_i, shift_i, True)
         destination_ptr[unsafe_offset=i * n_vars + i] = Op.finalize(acc, True)

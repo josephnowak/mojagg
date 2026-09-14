@@ -33,10 +33,11 @@ from mojagg.nanfuncs.anynan import AnyNan
 from mojagg.nanfuncs.nanargmax import NanArgMax
 from mojagg.nanfuncs.nanargmin import NanArgMin
 from mojagg.nanfuncs.nancount import NanCount
-from mojagg.nanfuncs.nanmatrix import (
-    NanCorrOp,
-    NanCovOp,
-)
+
+# Matrix kernels own their concrete operation types; nanmatrix provides the
+# shared pairwise accumulator and execution driver.
+from mojagg.nanfuncs.nancorrmatrix import NanCorrOp
+from mojagg.nanfuncs.nancovmatrix import NanCovOp
 from mojagg.nanfuncs.nanmax import NanMax
 from mojagg.nanfuncs.nanmean import NanMean
 from mojagg.nanfuncs.nanmin import NanMin
@@ -180,6 +181,47 @@ def allocate_signature[
 def _vectorize_policy(cfg: PythonObject) raises -> VectorizeDispatchPolicy:
     var values = _cfg_params(cfg)
     return VectorizeDispatchPolicy(values[1], values[0], values[2])
+
+
+@always_inline
+def _matrix_schedule(
+    batch: Int,
+    n_vars: Int,
+    n_obs: Int,
+    threshold: Int,
+    workers: Int,
+    parallel_min_groups: Int,
+) -> Tuple[VectorizeDispatchPolicy, Int]:
+    """Choose outer or pair-tile parallelism for one matrix call.
+
+    Matrix work scales with the upper triangle, not with one input core.  The
+    generic driver only sees ``n_vars * n_obs`` as its core length, so the
+    matrix binding performs the work gate here and passes a zero driver
+    threshold once the pair-work gate is satisfied.
+    """
+
+    var pair_count = n_vars * (n_vars + 1) // 2
+    var pair_work = pair_count * n_obs
+    var required_work = max(threshold, 0)
+    # A batched call amortizes one worker-pool launch over every matrix.  Use
+    # aggregate pair work for that path; a single matrix still gates on its own
+    # pair work before enabling the inner tile pool.
+    var dispatch_work = pair_work
+    if batch > 1:
+        dispatch_work = pair_work * batch
+    if dispatch_work < required_work:
+        return (VectorizeDispatchPolicy(1, 0, 1), 1)
+
+    var groups = max(parallel_min_groups, 1)
+    groups = min(groups, max(batch, 1))
+    if batch > 1:
+        return (
+            VectorizeDispatchPolicy(workers, 0, groups),
+            1,
+        )
+
+    var requested = workers if workers > 0 else 16
+    return (VectorizeDispatchPolicy(1, 0, 1), requested)
 
 
 def _apply_reduction[
@@ -537,21 +579,30 @@ def nancovmatrix_binding[
     workers: PythonObject,
     parallel_min_groups: PythonObject,
 ) raises -> PythonObject:
-    if Int(py=batch) == 0:
+    var batch_count = Int(py=batch)
+    var variables = Int(py=n_vars)
+    var observations = Int(py=n_obs)
+    if batch_count == 0:
         return out_arr
-    var policy = VectorizeDispatchPolicy(
-        Int(py=workers), Int(py=threshold), Int(py=parallel_min_groups)
+    var schedule = _matrix_schedule(
+        batch_count,
+        variables,
+        observations,
+        Int(py=threshold),
+        Int(py=workers),
+        Int(py=parallel_min_groups),
     )
     var operation = NanCovOp[dtype](
-        Int(py=n_vars),
-        Int(py=n_obs),
+        variables,
+        observations,
+        schedule[1],
     )
     return _apply_matrix[dtype, NanCovOp[dtype]](
         arr,
         out_arr,
-        Int(py=n_vars),
-        Int(py=n_obs),
-        policy,
+        variables,
+        observations,
+        schedule[0],
         operation,
         "nancovmatrix",
     )
@@ -569,21 +620,30 @@ def nancorrmatrix_binding[
     workers: PythonObject,
     parallel_min_groups: PythonObject,
 ) raises -> PythonObject:
-    if Int(py=batch) == 0:
+    var batch_count = Int(py=batch)
+    var variables = Int(py=n_vars)
+    var observations = Int(py=n_obs)
+    if batch_count == 0:
         return out_arr
-    var policy = VectorizeDispatchPolicy(
-        Int(py=workers), Int(py=threshold), Int(py=parallel_min_groups)
+    var schedule = _matrix_schedule(
+        batch_count,
+        variables,
+        observations,
+        Int(py=threshold),
+        Int(py=workers),
+        Int(py=parallel_min_groups),
     )
     var operation = NanCorrOp[dtype](
-        Int(py=n_vars),
-        Int(py=n_obs),
+        variables,
+        observations,
+        schedule[1],
     )
     return _apply_matrix[dtype, NanCorrOp[dtype]](
         arr,
         out_arr,
-        Int(py=n_vars),
-        Int(py=n_obs),
-        policy,
+        variables,
+        observations,
+        schedule[0],
         operation,
         "nancorrmatrix",
     )
