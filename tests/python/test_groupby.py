@@ -344,14 +344,16 @@ def test_group_remaining_functions_multiaxis_parity(function_name):
 @pytest.mark.parametrize("function_name", GROUPED_BOOL_FUNCTIONS)
 def test_group_boolean_input_parity(function_name):
     values = np.array([True, False, True, False, True], dtype=np.bool_)
-    labels = np.array([0, 0, -1, 2, 3], dtype=np.int32)
+    # numbagg leaves empty integer-group outputs undefined; keep every
+    # non-negative group populated so the parity comparison is deterministic.
+    labels = np.array([0, 1, -1, 2, 3], dtype=np.int32)
 
-    actual = getattr(mojagg, function_name)(values, labels, num_labels=5)
+    actual = getattr(mojagg, function_name)(values, labels, num_labels=4)
     expected = _numbagg_group_result(
         function_name,
         values,
         labels,
-        num_labels=5,
+        num_labels=4,
     )
 
     assert actual.dtype == expected.dtype
