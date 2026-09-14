@@ -1,4 +1,4 @@
-"""NaN-aware mean operation for the native-tuple GUFunc."""
+"""NaN-aware mean operation for the guvectorize driver."""
 
 from std.algorithm import vectorize
 from std.collections import Span
@@ -6,8 +6,12 @@ from std.math import isnan
 from std.sys.info import simd_width_of
 
 from mojagg.core.numeric import nan_or_zero
-from mojagg.core.tensor_view import TensorArg
-from mojagg.drivers.gufunc import GUFuncOperation
+from mojagg.drivers.guvectorize import (
+    CoreSpec,
+    Dim,
+    GUTensor,
+    GUFuncKernel,
+)
 
 
 @always_inline
@@ -54,20 +58,19 @@ def nan_mean_contiguous[
 
 
 @fieldwise_init
-struct NanMean[dtype: DType](GUFuncOperation, ImplicitlyCopyable):
+struct NanMean[dtype: DType](GUFuncKernel, ImplicitlyCopyable):
     """Accumulate in float64 and write the result in the requested dtype."""
 
     comptime value_dtype = Self.dtype
     comptime out_dtype = Self.dtype
-    comptime Tensors = Tuple[
-        TensorArg[Self.value_dtype, False],
-        TensorArg[Self.out_dtype, True],
+    comptime Signature = Tuple[
+        GUTensor[Self.value_dtype, False, CoreSpec[Dim[0]]],
+        GUTensor[Self.out_dtype, True, CoreSpec[]],
     ]
 
     @always_inline
-    def apply(mut self, tensors: Self.Tensors):
-        var input = tensors[0].copy()
-        var output = tensors[1].copy()
+    def __call__(mut self, tensors: Self.Signature):
+        var input, output = tensors
         var values = input.read_span()
         var state = nan_mean_contiguous[Self.dtype](values)
         var total = state[0]

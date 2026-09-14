@@ -21,6 +21,8 @@ _GROUP_VALUE_TYPES = (
     (np.dtype(np.int64), "i64"),
     (np.dtype(np.int32), "i32"),
 )
+_GROUP_FLOAT64_PROMOTIONS = {"group_nanvar", "group_nanstd"}
+_GROUP_FLOAT_VALUE_TYPES = _GROUP_VALUE_TYPES[:2]
 _GROUP_LABEL_TYPES = (
     (np.dtype(np.int64), "i64"),
     (np.dtype(np.int32), "i32"),
@@ -28,6 +30,10 @@ _GROUP_LABEL_TYPES = (
 
 
 def _make_group_kernels(op_name: str):
+    if op_name in _GROUP_FLOAT64_PROMOTIONS:
+        value_types = _GROUP_FLOAT_VALUE_TYPES
+    else:
+        value_types = _GROUP_VALUE_TYPES
     return {
         value_dtype: {
             label_dtype: getattr(
@@ -36,7 +42,7 @@ def _make_group_kernels(op_name: str):
             )
             for label_dtype, label_suffix in _GROUP_LABEL_TYPES
         }
-        for value_dtype, value_suffix in _GROUP_VALUE_TYPES
+        for value_dtype, value_suffix in value_types
     }
 
 
@@ -61,7 +67,7 @@ _GROUP_KERNELS = {
     )
 }
 
-_GROUP_FLOAT64_PROMOTIONS = {"group_nanvar", "group_nanstd"}
+_GROUP_BOOL_SUPPORTED = set(_GROUP_KERNELS) - _GROUP_FLOAT64_PROMOTIONS
 
 
 def _normalize_group_axes(values: np.ndarray, labels: np.ndarray, axis) -> tuple[int, ...]:
@@ -95,10 +101,24 @@ def _prepare_group_call(values, labels, axis, num_labels, op_name):
         raise TypeError(
             f"group labels do not support dtype {labels_arr.dtype}; supported: int32, int64"
         )
+    if values_arr.dtype == np.dtype(np.bool_):
+        if op_name not in _GROUP_BOOL_SUPPORTED:
+            raise TypeError(
+                f"{op_name} does not support boolean input. Convert to a numeric type first."
+            )
+        # numbagg converts supported boolean grouped inputs to int32 before
+        # selecting the gufunc signature. Keep that conversion at the public
+        # boundary so native kernels only handle their registered dtypes.
+        values_arr = values_arr.astype(np.int32)
+    if op_name in _GROUP_FLOAT64_PROMOTIONS and np.issubdtype(values_arr.dtype, np.integer):
+        # These operations intentionally follow numbagg's supports_ints=False
+        # path. The promotion is visible at the Python boundary; kernels only
+        # see their actual accumulation dtype.
+        values_arr = values_arr.astype(np.float64)
     if values_arr.dtype not in _GROUP_KERNELS[op_name]:
+        supported = ", ".join(str(dtype) for dtype in _GROUP_KERNELS[op_name])
         raise TypeError(
-            f"{op_name} does not support dtype {values_arr.dtype}; "
-            "supported: float32, float64, int32, int64"
+            f"{op_name} does not support dtype {values_arr.dtype}; supported: {supported}"
         )
     if values_arr.ndim == 0:
         values_arr = values_arr.reshape(1)
@@ -106,11 +126,6 @@ def _prepare_group_call(values, labels, axis, num_labels, op_name):
         labels_arr = labels_arr.reshape(1)
     axes = _normalize_group_axes(values_arr, labels_arr, axis)
     nlabels = _resolve_num_labels(labels_arr, num_labels)
-    if op_name in _GROUP_FLOAT64_PROMOTIONS and np.issubdtype(values_arr.dtype, np.integer):
-        # These operations intentionally follow numbagg's supports_ints=False
-        # path. The promotion is visible at the Python boundary; kernels only
-        # see their actual accumulation dtype.
-        values_arr = values_arr.astype(np.float64)
     # The tuple GUFunc receives one runtime layout per operand.  Expand labels
     # to the value rank as a zero-copy broadcast view so outer dimensions
     # align even when the public grouped API receives labels shaped only like

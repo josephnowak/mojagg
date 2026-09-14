@@ -6,8 +6,12 @@ from std.math import iota, isnan
 from std.sys.info import simd_width_of
 
 from mojagg.core.numeric import neg_inf_or_min, pos_inf_or_max
-from mojagg.core.tensor_view import TensorArg
-from mojagg.drivers.gufunc import GUFuncOperation
+from mojagg.drivers.guvectorize import (
+    CoreSpec,
+    Dim,
+    GUTensor,
+    GUFuncKernel,
+)
 
 
 @always_inline
@@ -95,18 +99,17 @@ def nan_arg_extreme_contiguous[
 struct NanArgExtrema[
     dtype: DType,
     is_min: Bool,
-](GUFuncOperation, ImplicitlyCopyable):
+](GUFuncKernel, ImplicitlyCopyable):
     comptime value_dtype = Self.dtype
     comptime out_dtype = DType.int64
-    comptime Tensors = Tuple[
-        TensorArg[Self.value_dtype, False],
-        TensorArg[Self.out_dtype, True],
+    comptime Signature = Tuple[
+        GUTensor[Self.value_dtype, False, CoreSpec[Dim[0]]],
+        GUTensor[Self.out_dtype, True, CoreSpec[]],
     ]
 
     @always_inline
-    def apply(mut self, tensors: Self.Tensors):
-        var input = tensors[0].copy()
-        var output = tensors[1].copy()
+    def __call__(mut self, tensors: Self.Signature):
+        var input, output = tensors
         var index = nan_arg_extreme_contiguous[Self.dtype, Self.is_min](
             input.read_span()
         )

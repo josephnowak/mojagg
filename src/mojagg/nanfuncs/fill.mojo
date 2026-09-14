@@ -10,14 +10,18 @@ from std.math import isnan
 from std.memory import unsafe_memcpy
 
 from mojagg.core.numeric import nan_or_zero
-from mojagg.core.tensor_view import TensorArg
-from mojagg.drivers.gufunc import GUFuncOperation
+from mojagg.drivers.guvectorize import (
+    CoreSpec,
+    Dim,
+    GUTensor,
+    GUFuncKernel,
+)
 
 
 struct FillKernel[
     dtype: DType,
     backward: Bool = False,
-](GUFuncOperation, ImplicitlyCopyable):
+](GUFuncKernel, ImplicitlyCopyable):
     """Fill NaN runs in one core.
 
     ``limit < 0`` permits an unlimited run after a valid value. A nonnegative
@@ -25,9 +29,9 @@ struct FillKernel[
     value. Leading missing values remain NaN for floating point input.
     """
 
-    comptime Tensors = Tuple[
-        TensorArg[Self.dtype, False],
-        TensorArg[Self.dtype, True],
+    comptime Signature = Tuple[
+        GUTensor[Self.dtype, False, CoreSpec[Dim[0]]],
+        GUTensor[Self.dtype, True, CoreSpec[Dim[0]]],
     ]
 
     var limit: Int
@@ -52,9 +56,8 @@ struct FillKernel[
             return 1
 
     @always_inline
-    def apply(mut self, tensors: Self.Tensors):
-        var source_view = tensors[0].copy()
-        var destination_view = tensors[1].copy()
+    def __call__(mut self, tensors: Self.Signature):
+        var source_view, destination_view = tensors
         var source = source_view.read_span()
         var destination = destination_view.write_span()
         var n = len(source)

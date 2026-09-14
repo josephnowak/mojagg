@@ -1,4 +1,4 @@
-"""NaN-aware variance and standard deviation operations."""
+"""NaN-aware variance and standard deviation operations for guvectorize."""
 
 from std.algorithm import vectorize
 from std.collections import Span
@@ -6,8 +6,12 @@ from std.math import isnan, sqrt
 from std.sys.info import simd_width_of
 
 from mojagg.core.numeric import nan_or_zero
-from mojagg.core.tensor_view import TensorArg
-from mojagg.drivers.gufunc import GUFuncOperation
+from mojagg.drivers.guvectorize import (
+    CoreSpec,
+    Dim,
+    GUTensor,
+    GUFuncKernel,
+)
 from mojagg.nanfuncs.nanmean import nan_mean_contiguous
 
 
@@ -53,14 +57,14 @@ def nan_squared_deviation_contiguous[
 struct NanVar[
     dtype: DType,
     take_sqrt: Bool = False,
-](GUFuncOperation, ImplicitlyCopyable):
+](GUFuncKernel, ImplicitlyCopyable):
     """Compute a two-pass float64 accumulation over one prepared core."""
 
     comptime value_dtype = Self.dtype
     comptime out_dtype = Self.dtype
-    comptime Tensors = Tuple[
-        TensorArg[Self.value_dtype, False],
-        TensorArg[Self.out_dtype, True],
+    comptime Signature = Tuple[
+        GUTensor[Self.value_dtype, False, CoreSpec[Dim[0]]],
+        GUTensor[Self.out_dtype, True, CoreSpec[]],
     ]
 
     var ddof: Int
@@ -69,9 +73,8 @@ struct NanVar[
         self.ddof = ddof
 
     @always_inline
-    def apply(mut self, tensors: Self.Tensors):
-        var input = tensors[0].copy()
-        var output = tensors[1].copy()
+    def __call__(mut self, tensors: Self.Signature):
+        var input, output = tensors
         var values = input.read_span()
         var state = nan_mean_contiguous[Self.dtype](values)
         var total = state[0]

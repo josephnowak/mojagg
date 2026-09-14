@@ -3,23 +3,26 @@
 from std.math import isnan
 from std.sys.info import simd_width_of
 
-from mojagg.core.tensor_view import TensorArg
-from mojagg.drivers.gufunc import GUFuncOperation
+from mojagg.drivers.guvectorize import (
+    CoreSpec,
+    Dim,
+    GUTensor,
+    GUFuncKernel,
+)
 
 
 @fieldwise_init
-struct AnyNan[dtype: DType](GUFuncOperation, ImplicitlyCopyable):
+struct AnyNan[dtype: DType](GUFuncKernel, ImplicitlyCopyable):
     """Write whether at least one value in the active core is NaN."""
 
-    comptime Tensors = Tuple[
-        TensorArg[Self.dtype, False],
-        TensorArg[DType.bool, True],
+    comptime Signature = Tuple[
+        GUTensor[Self.dtype, False, CoreSpec[Dim[0]]],
+        GUTensor[DType.bool, True, CoreSpec[]],
     ]
 
     @always_inline
-    def apply(mut self, tensors: Self.Tensors):
-        var input = tensors[0].copy()
-        var output = tensors[1].copy()
+    def __call__(mut self, tensors: Self.Signature):
+        var input, output = tensors
         var values = input.read_span()
         var result = False
         var n = len(values)

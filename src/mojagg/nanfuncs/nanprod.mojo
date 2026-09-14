@@ -1,12 +1,16 @@
-"""NaN-aware product operation for the native-tuple GUFunc."""
+"""NaN-aware product operation for the guvectorize driver."""
 
 from std.algorithm import vectorize
 from std.collections import Span
 from std.math import isnan
 from std.sys.info import simd_width_of
 
-from mojagg.core.tensor_view import TensorArg
-from mojagg.drivers.gufunc import GUFuncOperation
+from mojagg.drivers.guvectorize import (
+    CoreSpec,
+    Dim,
+    GUTensor,
+    GUFuncKernel,
+)
 
 
 @always_inline
@@ -44,19 +48,18 @@ def nan_product_contiguous[
 
 
 @fieldwise_init
-struct NanProd[dtype: DType](GUFuncOperation, ImplicitlyCopyable):
+struct NanProd[dtype: DType](GUFuncKernel, ImplicitlyCopyable):
     """Multiply finite values and use one as the empty/all-NaN identity."""
 
     comptime value_dtype = Self.dtype
     comptime out_dtype = Self.dtype
-    comptime Tensors = Tuple[
-        TensorArg[Self.value_dtype, False],
-        TensorArg[Self.out_dtype, True],
+    comptime Signature = Tuple[
+        GUTensor[Self.value_dtype, False, CoreSpec[Dim[0]]],
+        GUTensor[Self.out_dtype, True, CoreSpec[]],
     ]
 
     @always_inline
-    def apply(mut self, tensors: Self.Tensors):
-        var input = tensors[0].copy()
-        var output = tensors[1].copy()
+    def __call__(mut self, tensors: Self.Signature):
+        var input, output = tensors
         var values = input.read_span()
         output.write_span()[0] = nan_product_contiguous[Self.dtype](values)

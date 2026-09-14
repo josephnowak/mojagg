@@ -1,35 +1,45 @@
-"""Behavioral tests for the native-tuple GUFunc driver."""
+"""Behavioral tests for the combined-signature guvectorize driver."""
 
 from std.atomic import Atomic
 from std.memory import alloc, dealloc
 from std.memory.alloc import Layout
+from std.sys.info import simd_width_of
 from std.testing import assert_equal, assert_raises
 
-from mojagg.core.tensor_view import DimArray, TensorArg, DType
-from mojagg.drivers.gufunc import DispatchPolicy, GUFunc, GUFuncOperation
+from mojagg.drivers.guvectorize import (
+    AxisSpec,
+    CoreSpec,
+    Dim,
+    DimArray,
+    GUTensor,
+    GUFuncKernel,
+    DispatchPolicy as VectorizeDispatchPolicy,
+    build_signature,
+    guvectorize,
+)
 from mojagg.nanfuncs.nansum import NanSum
 
 
-struct MixedTupleTransform(GUFuncOperation, ImplicitlyCopyable):
+struct MixedTupleTransform(GUFuncKernel, ImplicitlyCopyable):
     """Exercise a heterogeneous two-input/two-output native tuple.
 
     The second input deliberately has a stride-two core.  The operation still
-    receives two one-dimensional contiguous read spans because the GUFunc
-    materializes that input into its worker scratch area before ``apply``.
+    receives two one-dimensional contiguous read spans because guvectorize
+    materializes that input into its worker scratch area before ``__call__``.
     """
 
-    comptime Tensors = Tuple[
-        TensorArg[DType.float32, False],
-        TensorArg[DType.float64, False],
-        TensorArg[DType.float64, True],
-        TensorArg[DType.float32, True],
+    comptime Signature = Tuple[
+        GUTensor[DType.float32, False, CoreSpec[Dim[0]]],
+        GUTensor[DType.float64, False, CoreSpec[Dim[0]]],
+        GUTensor[DType.float64, True, CoreSpec[Dim[0]]],
+        GUTensor[DType.float32, True, CoreSpec[Dim[0]]],
     ]
 
     def __init__(out self):
         pass
 
     @always_inline
-    def apply(mut self, tensors: Self.Tensors):
+    def __call__(mut self, tensors: Self.Signature):
         var left_arg = tensors[0].copy()
         var right_arg = tensors[1].copy()
         var first_arg = tensors[2].copy()
@@ -47,19 +57,19 @@ struct MixedTupleTransform(GUFuncOperation, ImplicitlyCopyable):
             second.unsafe_ptr()[unsafe_offset=i] = Float32(value)
 
 
-struct CopyTupleOperation(GUFuncOperation, ImplicitlyCopyable):
+struct CopyTupleOperation(GUFuncKernel, ImplicitlyCopyable):
     """Copy one logical core into a writable output core."""
 
-    comptime Tensors = Tuple[
-        TensorArg[DType.float64, False],
-        TensorArg[DType.float64, True],
+    comptime Signature = Tuple[
+        GUTensor[DType.float64, False, CoreSpec[Dim[0]]],
+        GUTensor[DType.float64, True, CoreSpec[Dim[0]]],
     ]
 
     def __init__(out self):
         pass
 
     @always_inline
-    def apply(mut self, tensors: Self.Tensors):
+    def __call__(mut self, tensors: Self.Signature):
         var source_arg = tensors[0].copy()
         var destination_arg = tensors[1].copy()
         var source = source_arg.read_span()
@@ -70,12 +80,12 @@ struct CopyTupleOperation(GUFuncOperation, ImplicitlyCopyable):
             ]
 
 
-struct ParallelProbeOperation(Copyable, GUFuncOperation):
-    """Record how many worker operation copies the GUFunc creates."""
+struct ParallelProbeOperation(Copyable, GUFuncKernel):
+    """Record how many worker operation copies guvectorize creates."""
 
-    comptime Tensors = Tuple[
-        TensorArg[DType.float32, False],
-        TensorArg[DType.float32, True],
+    comptime Signature = Tuple[
+        GUTensor[DType.float32, False, CoreSpec[Dim[0]]],
+        GUTensor[DType.float32, True, CoreSpec[Dim[0]]],
     ]
 
     var copy_counter_address: Int
@@ -93,7 +103,7 @@ struct ParallelProbeOperation(Copyable, GUFuncOperation):
         _ = Atomic[DType.int32].fetch_add(counter, 1)
 
     @always_inline
-    def apply(mut self, tensors: Self.Tensors):
+    def __call__(mut self, tensors: Self.Signature):
         var source_arg = tensors[0].copy()
         var destination_arg = tensors[1].copy()
         var source = source_arg.read_span()
@@ -104,7 +114,7 @@ struct ParallelProbeOperation(Copyable, GUFuncOperation):
             ]
 
 
-def test_native_tuple_nansum() raises:
+def test_guvectorize_nansum() raises:
     var source = alloc(Layout[Float64](count=4))
     var destination = alloc(Layout[Float64](count=1))
     var source_ptr = source.unsafe_ptr()
@@ -114,22 +124,34 @@ def test_native_tuple_nansum() raises:
     var shape = DimArray(fill=1)
     var stride = DimArray(fill=1)
     shape[0] = 4
-    var input_layout = TensorArg[DType.float64, False].runtime_layout(
-        shape, stride
-    )
-    var output_layout = TensorArg[DType.float64, True].runtime_layout(
-        DimArray(fill=1), DimArray(fill=1)
-    )
-    var tensors = Tuple(
-        TensorArg[DType.float64, False](input_layout, 1, Int(source_ptr)),
-        TensorArg[DType.float64, True](
-            output_layout, 0, Int(destination.unsafe_ptr())
-        ),
-    )
-    var axes = DimArray(fill=0)
-    var driver = GUFunc[NanSum[DType.float64]](NanSum[DType.float64]())
+    var input = GUTensor[
+        DType.float64,
+        False,
+        CoreSpec[Dim[0]],
+    ].borrow(Int(source_ptr), shape, stride, 1)
+    var axis_values = DimArray(fill=0)
+    axis_values[0] = 0
+    var input_axes = AxisSpec(axis_values.copy(), 1)
+    var output_axes = AxisSpec.empty()
     try:
-        driver.execute(tensors, axes, 1, axes, 0, DispatchPolicy(1, 0))
+        var template = GUTensor[
+            DType.float64,
+            True,
+            CoreSpec[],
+        ].empty()
+        var planned = build_signature[NanSum[DType.float64]](
+            Tuple(input, template), input_axes, output_axes
+        )
+        var input_view, output_view = planned
+        output_view.bind_address(Int(destination.unsafe_ptr()), 1)
+        var signature = Tuple(input_view, output_view)
+        guvectorize[NanSum[DType.float64]](
+            NanSum[DType.float64](),
+            signature,
+            input_axes,
+            output_axes,
+            VectorizeDispatchPolicy(1, 0, 1),
+        )
     except e:
         dealloc(source^)
         dealloc(destination^)
@@ -139,6 +161,59 @@ def test_native_tuple_nansum() raises:
     dealloc(source^)
     dealloc(destination^)
     assert_equal(result, 10.0)
+
+
+def test_guvectorize_nansum_power() raises:
+    comptime width = simd_width_of[DType.float64]() * 8
+    var source = alloc(Layout[Float64](count=width))
+    var destination = alloc(Layout[Float64](count=1))
+    var source_ptr = source.unsafe_ptr()
+    var expected = Float64(0)
+    for i in range(width):
+        var value = Float64((i % 5) - 2)
+        source_ptr[unsafe_offset=i] = value
+        expected += value * value
+
+    var shape = DimArray(fill=1)
+    var stride = DimArray(fill=1)
+    shape[0] = width
+    var input = GUTensor[
+        DType.float64,
+        False,
+        CoreSpec[Dim[0]],
+    ].borrow(Int(source_ptr), shape, stride, 1)
+    var axis_values = DimArray(fill=0)
+    axis_values[0] = 0
+    var input_axes = AxisSpec(axis_values.copy(), 1)
+    var output_axes = AxisSpec.empty()
+    try:
+        var template = GUTensor[
+            DType.float64,
+            True,
+            CoreSpec[],
+        ].empty()
+        var planned = build_signature[NanSum[DType.float64, 2]](
+            Tuple(input, template), input_axes, output_axes
+        )
+        var input_view, output_view = planned
+        output_view.bind_address(Int(destination.unsafe_ptr()), 1)
+        var signature = Tuple(input_view, output_view)
+        guvectorize[NanSum[DType.float64, 2]](
+            NanSum[DType.float64, 2](),
+            signature,
+            input_axes,
+            output_axes,
+            VectorizeDispatchPolicy(1, 0, 1),
+        )
+    except e:
+        dealloc(source^)
+        dealloc(destination^)
+        raise e
+
+    var result = destination.unsafe_ptr()[unsafe_offset=0]
+    dealloc(source^)
+    dealloc(destination^)
+    assert_equal(result, expected)
 
 
 def test_heterogeneous_tuple_and_input_scratch() raises:
@@ -176,40 +251,58 @@ def test_heterogeneous_tuple_and_input_scratch() raises:
     var output_stride = left_stride.copy()
 
     var tensors = Tuple(
-        TensorArg[DType.float32, False](
-            TensorArg[DType.float32, False].runtime_layout(
-                left_shape, left_stride
-            ),
-            2,
+        GUTensor[
+            DType.float32,
+            False,
+            CoreSpec[Dim[0]],
+        ].borrow(
             Int(left_storage.unsafe_ptr()),
-        ),
-        TensorArg[DType.float64, False](
-            TensorArg[DType.float64, False].runtime_layout(
-                left_shape, right_stride
-            ),
+            left_shape,
+            left_stride,
             2,
+        ),
+        GUTensor[
+            DType.float64,
+            False,
+            CoreSpec[Dim[0]],
+        ].borrow(
             Int(right_storage.unsafe_ptr()),
-        ),
-        TensorArg[DType.float64, True](
-            TensorArg[DType.float64, True].runtime_layout(
-                output_shape, output_stride
-            ),
+            left_shape,
+            right_stride,
             2,
+        ),
+        GUTensor[
+            DType.float64,
+            True,
+            CoreSpec[Dim[0]],
+        ].borrow(
             Int(first_storage.unsafe_ptr()),
-        ),
-        TensorArg[DType.float32, True](
-            TensorArg[DType.float32, True].runtime_layout(
-                output_shape, output_stride
-            ),
+            output_shape,
+            output_stride,
             2,
+        ),
+        GUTensor[
+            DType.float32,
+            True,
+            CoreSpec[Dim[0]],
+        ].borrow(
             Int(second_storage.unsafe_ptr()),
+            output_shape,
+            output_stride,
+            2,
         ),
     )
-    var axes = DimArray(fill=0)
-    axes[0] = 1
-    var driver = GUFunc[MixedTupleTransform](MixedTupleTransform())
+    var axes_values = DimArray(fill=0)
+    axes_values[0] = 1
+    var axes = AxisSpec(axes_values.copy(), 1)
     try:
-        driver.execute(tensors, axes, 1, axes, 1, DispatchPolicy(1, 0))
+        guvectorize[MixedTupleTransform](
+            MixedTupleTransform(),
+            tensors,
+            axes,
+            axes,
+            VectorizeDispatchPolicy(1, 0, 1),
+        )
     except e:
         dealloc(left_storage^)
         dealloc(right_storage^)
@@ -263,35 +356,41 @@ def run_noncontiguous_writable_core() raises:
     output_stride[1] = 1
 
     var tensors = Tuple(
-        TensorArg[DType.float64, False](
-            TensorArg[DType.float64, False].runtime_layout(
-                input_shape, input_stride
-            ),
-            2,
+        GUTensor[
+            DType.float64,
+            False,
+            CoreSpec[Dim[0]],
+        ].borrow(
             Int(source.unsafe_ptr()),
-        ),
-        TensorArg[DType.float64, True](
-            TensorArg[DType.float64, True].runtime_layout(
-                output_shape, output_stride
-            ),
+            input_shape,
+            input_stride,
             2,
+        ),
+        GUTensor[
+            DType.float64,
+            True,
+            CoreSpec[Dim[0]],
+        ].borrow(
             Int(destination.unsafe_ptr()),
+            output_shape,
+            output_stride,
+            2,
         ),
     )
-    var input_axes = DimArray(fill=0)
-    input_axes[0] = 1
-    var output_axes = DimArray(fill=0)
-    output_axes[0] = 0
-    var driver = GUFunc[CopyTupleOperation](CopyTupleOperation())
+    var input_axis_values = DimArray(fill=0)
+    input_axis_values[0] = 1
+    var output_axis_values = DimArray(fill=0)
+    output_axis_values[0] = 0
+    var input_axes = AxisSpec(input_axis_values.copy(), 1)
+    var output_axes = AxisSpec(output_axis_values.copy(), 1)
 
     try:
-        driver.execute(
+        guvectorize[CopyTupleOperation](
+            CopyTupleOperation(),
             tensors,
             input_axes,
-            1,
             output_axes,
-            1,
-            DispatchPolicy(1, 1_000_000),
+            VectorizeDispatchPolicy(1, 1_000_000, 1),
         )
     except e:
         dealloc(source^)
@@ -328,7 +427,6 @@ def test_three_dimensional_outer_iterations() raises:
     # orders for every pair of axes.
     var first_axes = [0, 0, 1, 1, 2, 2]
     var second_axes = [1, 2, 0, 2, 0, 1]
-    var driver = GUFunc[CopyTupleOperation](CopyTupleOperation())
     var all_ok = True
     try:
         for case_index in range(6):
@@ -356,29 +454,34 @@ def test_three_dimensional_outer_iterations() raises:
             var output_axes = DimArray(fill=0)
             output_axes[0] = 1
             var tensors = Tuple(
-                TensorArg[DType.float64, False](
-                    TensorArg[DType.float64, False].runtime_layout(
-                        shape, stride
-                    ),
-                    3,
+                GUTensor[
+                    DType.float64,
+                    False,
+                    CoreSpec[Dim[0]],
+                ].borrow(
                     Int(source.unsafe_ptr()),
+                    shape,
+                    stride,
+                    3,
                 ),
-                TensorArg[DType.float64, True](
-                    TensorArg[DType.float64, True].runtime_layout(
-                        output_shape, output_stride
-                    ),
-                    2,
+                GUTensor[
+                    DType.float64,
+                    True,
+                    CoreSpec[Dim[0]],
+                ].borrow(
                     Int(destination.unsafe_ptr()),
+                    output_shape,
+                    output_stride,
+                    2,
                 ),
             )
 
-            driver.execute(
+            guvectorize[CopyTupleOperation](
+                CopyTupleOperation(),
                 tensors,
-                input_axes,
-                2,
-                output_axes,
-                1,
-                DispatchPolicy(1, 1_000_000),
+                AxisSpec(input_axes.copy(), 2),
+                AxisSpec(output_axes.copy(), 1),
+                VectorizeDispatchPolicy(1, 1_000_000, 1),
             )
 
             for outer in range(shape[outer_axis]):
@@ -426,36 +529,44 @@ def run_parallel_threshold_case(core_length: Int, expected_copies: Int) raises:
     stride[0] = core_length
     stride[1] = 1
     var tensors = Tuple(
-        TensorArg[DType.float32, False](
-            TensorArg[DType.float32, False].runtime_layout(shape, stride),
-            2,
+        GUTensor[
+            DType.float32,
+            False,
+            CoreSpec[Dim[0]],
+        ].borrow(
             Int(source.unsafe_ptr()),
-        ),
-        TensorArg[DType.float32, True](
-            TensorArg[DType.float32, True].runtime_layout(shape, stride),
+            shape,
+            stride,
             2,
+        ),
+        GUTensor[
+            DType.float32,
+            True,
+            CoreSpec[Dim[0]],
+        ].borrow(
             Int(destination.unsafe_ptr()),
+            shape,
+            stride,
+            2,
         ),
     )
-    var input_axes = DimArray(fill=0)
-    input_axes[0] = 1
-    var output_axes = DimArray(fill=0)
-    output_axes[0] = 1
-    var driver = GUFunc[ParallelProbeOperation](
-        ParallelProbeOperation(Int(copy_counter.unsafe_ptr()))
-    )
-    # GUFunc construction also copies the operation.  Count only copies made
-    # by execute_serial_or_parallel below.
+    var input_axis_values = DimArray(fill=0)
+    input_axis_values[0] = 1
+    var output_axis_values = DimArray(fill=0)
+    output_axis_values[0] = 1
+    var input_axes = AxisSpec(input_axis_values.copy(), 1)
+    var output_axes = AxisSpec(output_axis_values.copy(), 1)
+    var operation = ParallelProbeOperation(Int(copy_counter.unsafe_ptr()))
+    # Count only copies made by guvectorize execution below.
     copy_counter.unsafe_ptr()[unsafe_offset=0] = 0
 
     try:
-        driver.execute(
+        guvectorize[ParallelProbeOperation](
+            operation,
             tensors,
             input_axes,
-            1,
             output_axes,
-            1,
-            DispatchPolicy(4, 2_000_000),
+            VectorizeDispatchPolicy(4, 500_000, 4),
         )
     except e:
         dealloc(source^)
@@ -470,23 +581,24 @@ def run_parallel_threshold_case(core_length: Int, expected_copies: Int) raises:
     assert_equal(observed_copies, expected_copies)
 
 
-def test_parallel_threshold_uses_two_million_element_cutoff() raises:
-    """Execution stays serial below the cutoff and parallelizes at it."""
+def test_parallel_dispatch_requires_outer_and_inner_thresholds() raises:
+    """Both the outer-iteration and inner-core gates are required."""
 
-    var policy = DispatchPolicy(4, 2_000_000)
-    assert_equal(policy.effective_workers(4, 1), 1)
+    var policy = VectorizeDispatchPolicy(4, 500_000, 4)
+    assert_equal(policy.effective_workers(3, 500_000), 1)
     assert_equal(policy.effective_workers(4, 499_999), 1)
     assert_equal(policy.effective_workers(4, 500_000), 4)
     assert_equal(policy.effective_workers(4, 500_001), 4)
-    assert_equal(policy.effective_workers(1, 2_000_000), 1)
+    assert_equal(policy.effective_workers(1, 500_000), 1)
     run_parallel_threshold_case(499_999, 1)
     run_parallel_threshold_case(500_000, 4)
     run_parallel_threshold_case(500_001, 4)
 
 
 def main() raises:
-    test_native_tuple_nansum()
+    test_guvectorize_nansum()
+    test_guvectorize_nansum_power()
     test_heterogeneous_tuple_and_input_scratch()
     test_rejects_noncontiguous_writable_core()
     test_three_dimensional_outer_iterations()
-    test_parallel_threshold_uses_two_million_element_cutoff()
+    test_parallel_dispatch_requires_outer_and_inner_thresholds()

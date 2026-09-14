@@ -3,23 +3,26 @@
 The facade resolves axes, broadcasts labels, initializes the result and any
 operation workspace, and passes one normalized call into this module.  The
 typed binding below only performs the NumPy boundary conversion and runs the
-operation through the common GUFunc driver.
+operation through the common guvectorize driver.
 """
 
 from std.os import abort
 from std.python import PythonObject
 from std.python.bindings import PythonModuleBuilder
 
-from mojagg.core.tensor_view import (
-    DimArray as TensorDimArray,
-    MAX_RANK,
-    TensorArg,
-    _dtype_name,
-)
-from mojagg.drivers.gufunc import (
+from mojagg.core.numeric import _dtype_name
+from mojagg.drivers.guvectorize import (
+    AxisSpec,
+    CoreSpec,
+    CoreSpecProtocol,
+    Dim,
+    DimArray as VectorizeDimArray,
     DispatchPolicy,
-    GUFunc,
-    GUFuncOperation,
+    GUTensor,
+    GUFuncKernel,
+    guvectorize,
+    MAX_RANK,
+    MAX_RANK as VectorizeMaxRank,
 )
 from mojagg.groupby.nananyall import GroupNanAnyAll
 from mojagg.groupby.nanargminmax import GroupNanArgMinMax
@@ -30,10 +33,6 @@ from mojagg.groupby.nanminmax import GroupNanMinMax
 from mojagg.groupby.nanprod import GroupNanProd
 from mojagg.groupby.nansum import GroupNanSum
 from mojagg.groupby.nanvarstd import GroupNanVarStd
-from mojagg.python.tensor_view_binding import (
-    read_tensor_from_numpy,
-    write_tensor_from_numpy,
-)
 
 
 def _validate_dtype[dtype: DType](arr: PythonObject, op_name: String) raises:
@@ -47,8 +46,40 @@ def _validate_dtype[dtype: DType](arr: PythonObject, op_name: String) raises:
 
 def _policy(cfg: PythonObject) raises -> DispatchPolicy:
     return DispatchPolicy(
-        Int(py=cfg.threads),
-        Int(py=cfg.parallel_threshold),
+        workers=Int(py=cfg.threads),
+        parallel_threshold=Int(py=cfg.parallel_threshold),
+        parallel_min_groups=Int(py=cfg.parallel_min_groups),
+    )
+
+
+def _guvectorize_tensor[
+    dtype: DType,
+    writable: Bool,
+    core: CoreSpecProtocol,
+](arr: PythonObject) raises -> GUTensor[dtype, writable, core]:
+    """Borrow a NumPy array as a typed guvectorize tensor descriptor."""
+
+    var rank = Int(py=arr.ndim)
+    if rank < 0 or rank > VectorizeMaxRank:
+        raise Error("tensor rank exceeds guvectorize capacity")
+
+    var shape = VectorizeDimArray(fill=1)
+    var stride = VectorizeDimArray(fill=0)
+    var itemsize = Int(py=arr.dtype.itemsize)
+    if itemsize <= 0:
+        raise Error("tensor itemsize must be positive")
+    for axis in range(rank):
+        shape[axis] = Int(py=arr.shape[axis])
+        var byte_stride = Int(py=arr.strides[axis])
+        if byte_stride % itemsize != 0:
+            raise Error("array stride is not divisible by its itemsize")
+        stride[axis] = byte_stride // itemsize
+
+    return GUTensor[dtype, writable, core].borrow(
+        Int(py=arr.ctypes.data),
+        shape,
+        stride,
+        rank,
     )
 
 
@@ -59,7 +90,7 @@ def _apply_group[
     aux1_dtype: DType,
     aux2_dtype: DType,
     aux_count: Int,
-    Op: GUFuncOperation,
+    Op: GUFuncKernel,
 ](
     values: PythonObject,
     labels: PythonObject,
@@ -81,135 +112,112 @@ def _apply_group[
     comptime if aux_count > 1:
         _validate_dtype[aux2_dtype](auxiliaries[1], op_name + " auxiliary 1")
 
-    var values_tensor = read_tensor_from_numpy[value_dtype](values)
-    var labels_tensor = read_tensor_from_numpy[label_dtype](labels)
-    var output_tensor = write_tensor_from_numpy[out_dtype](group_out)
-
     var core_rank = Int(py=axes.__len__())
-    if core_rank < 1 or core_rank > MAX_RANK:
+    if core_rank < 1 or core_rank > VectorizeMaxRank:
         raise Error(
             op_name
             + ": expected 1.."
-            + String(MAX_RANK)
+            + String(VectorizeMaxRank)
             + " grouped axes, got "
             + String(core_rank)
         )
 
-    var input_axes = TensorDimArray(fill=0)
+    var values_ndim = Int(py=values.ndim)
+    var labels_ndim = Int(py=labels.ndim)
+    if labels_ndim != values_ndim:
+        raise Error(op_name + ": values and labels must have the same shape")
+    for axis in range(values_ndim):
+        if Int(py=values.shape[axis]) != Int(py=labels.shape[axis]):
+            raise Error(
+                op_name + ": values and labels must have the same shape"
+            )
+
+    var input_axes = VectorizeDimArray(fill=0)
     for d in range(core_rank):
         input_axes[d] = Int(py=axes[d])
 
-    var values_ndim = Int(py=values.ndim)
-    var labels_ndim = Int(py=labels.ndim)
     var output_ndim = Int(py=group_out.ndim)
 
-    var output_axes = TensorDimArray(fill=0)
-    output_axes[0] = output_ndim - 1
+    var input_axis_spec = AxisSpec(input_axes.copy(), core_rank)
+    var output_axis_spec = AxisSpec.empty()
+    output_axis_spec.count = 1
+    output_axis_spec[0] = output_ndim - 1
     var policy = _policy(options[1])
+
+    var values_tensor = _guvectorize_tensor[
+        value_dtype,
+        False,
+        CoreSpec[Dim[0]],
+    ](values)
+    var labels_tensor = _guvectorize_tensor[
+        label_dtype,
+        False,
+        CoreSpec[Dim[0]],
+    ](labels)
+    var output_tensor = _guvectorize_tensor[
+        out_dtype,
+        True,
+        CoreSpec[Dim[1]],
+    ](group_out)
 
     comptime if aux_count == 0:
         var tensors = Tuple(
-            TensorArg[value_dtype, False].from_read_tensor(
-                values_tensor,
-                values_ndim,
-                Int(py=values.ctypes.data),
-            ),
-            TensorArg[label_dtype, False].from_read_tensor(
-                labels_tensor,
-                labels_ndim,
-                Int(py=labels.ctypes.data),
-            ),
-            TensorArg[out_dtype, True].from_write_tensor(
-                output_tensor,
-                output_ndim,
-                Int(py=group_out.ctypes.data),
-            ),
+            values_tensor,
+            labels_tensor,
+            output_tensor,
         )
-        var driver = GUFunc[Op](operation)
-        driver.execute(
+        guvectorize[Op](
+            operation,
             tensors,
-            input_axes,
-            core_rank,
-            output_axes,
-            1,
+            input_axis_spec,
+            output_axis_spec,
             policy,
         )
     elif aux_count == 1:
         var aux1 = auxiliaries[0]
-        var aux1_tensor = write_tensor_from_numpy[aux1_dtype](aux1)
-        var aux1_ndim = Int(py=aux1.ndim)
+        var aux1_tensor = _guvectorize_tensor[
+            aux1_dtype,
+            True,
+            CoreSpec[Dim[1]],
+        ](aux1)
         var tensors = Tuple(
-            TensorArg[value_dtype, False].from_read_tensor(
-                values_tensor,
-                values_ndim,
-                Int(py=values.ctypes.data),
-            ),
-            TensorArg[label_dtype, False].from_read_tensor(
-                labels_tensor,
-                labels_ndim,
-                Int(py=labels.ctypes.data),
-            ),
-            TensorArg[out_dtype, True].from_write_tensor(
-                output_tensor,
-                output_ndim,
-                Int(py=group_out.ctypes.data),
-            ),
-            TensorArg[aux1_dtype, True].from_write_tensor(
-                aux1_tensor,
-                aux1_ndim,
-                Int(py=aux1.ctypes.data),
-            ),
+            values_tensor,
+            labels_tensor,
+            output_tensor,
+            aux1_tensor,
         )
-        var driver = GUFunc[Op](operation)
-        driver.execute(
+        guvectorize[Op](
+            operation,
             tensors,
-            input_axes,
-            core_rank,
-            output_axes,
-            1,
+            input_axis_spec,
+            output_axis_spec,
             policy,
         )
     else:
         var aux1 = auxiliaries[0]
         var aux2 = auxiliaries[1]
-        var aux1_tensor = write_tensor_from_numpy[aux1_dtype](aux1)
-        var aux2_tensor = write_tensor_from_numpy[aux2_dtype](aux2)
-        var aux1_ndim = Int(py=aux1.ndim)
-        var aux2_ndim = Int(py=aux2.ndim)
+        var aux1_tensor = _guvectorize_tensor[
+            aux1_dtype,
+            True,
+            CoreSpec[Dim[1]],
+        ](aux1)
+        var aux2_tensor = _guvectorize_tensor[
+            aux2_dtype,
+            True,
+            CoreSpec[Dim[1]],
+        ](aux2)
         var tensors = Tuple(
-            TensorArg[value_dtype, False].from_read_tensor(
-                values_tensor,
-                values_ndim,
-                Int(py=values.ctypes.data),
-            ),
-            TensorArg[label_dtype, False].from_read_tensor(
-                labels_tensor,
-                labels_ndim,
-                Int(py=labels.ctypes.data),
-            ),
-            TensorArg[out_dtype, True].from_write_tensor(
-                output_tensor,
-                output_ndim,
-                Int(py=group_out.ctypes.data),
-            ),
-            TensorArg[aux1_dtype, True].from_write_tensor(
-                aux1_tensor,
-                aux1_ndim,
-                Int(py=aux1.ctypes.data),
-            ),
-            TensorArg[aux2_dtype, True].from_write_tensor(
-                aux2_tensor,
-                aux2_ndim,
-                Int(py=aux2.ctypes.data),
-            ),
+            values_tensor,
+            labels_tensor,
+            output_tensor,
+            aux1_tensor,
+            aux2_tensor,
         )
-        var driver = GUFunc[Op](operation)
-        driver.execute(
+        guvectorize[Op](
+            operation,
             tensors,
-            input_axes,
-            core_rank,
-            output_axes,
-            1,
+            input_axis_spec,
+            output_axis_spec,
             policy,
         )
     return group_out
@@ -954,19 +962,6 @@ def PyInit_groupby_native() abi("C") -> PythonObject:
         m.def_function[group_nanvar_binding[DType.float32, DType.int32]](
             "group_nanvar_f32_i32"
         )
-        m.def_function[group_nanvar_binding[DType.int64, DType.int64]](
-            "group_nanvar_i64_i64"
-        )
-        m.def_function[group_nanvar_binding[DType.int64, DType.int32]](
-            "group_nanvar_i64_i32"
-        )
-        m.def_function[group_nanvar_binding[DType.int32, DType.int64]](
-            "group_nanvar_i32_i64"
-        )
-        m.def_function[group_nanvar_binding[DType.int32, DType.int32]](
-            "group_nanvar_i32_i32"
-        )
-
         m.def_function[group_nanstd_binding[DType.float64, DType.int64]](
             "group_nanstd_f64_i64"
         )
@@ -979,19 +974,6 @@ def PyInit_groupby_native() abi("C") -> PythonObject:
         m.def_function[group_nanstd_binding[DType.float32, DType.int32]](
             "group_nanstd_f32_i32"
         )
-        m.def_function[group_nanstd_binding[DType.int64, DType.int64]](
-            "group_nanstd_i64_i64"
-        )
-        m.def_function[group_nanstd_binding[DType.int64, DType.int32]](
-            "group_nanstd_i64_i32"
-        )
-        m.def_function[group_nanstd_binding[DType.int32, DType.int64]](
-            "group_nanstd_i32_i64"
-        )
-        m.def_function[group_nanstd_binding[DType.int32, DType.int32]](
-            "group_nanstd_i32_i32"
-        )
-
         m.def_function[
             group_nansum_of_squares_binding[DType.float64, DType.int64]
         ]("group_nansum_of_squares_f64_i64")

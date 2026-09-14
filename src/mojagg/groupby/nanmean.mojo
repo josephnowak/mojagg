@@ -5,22 +5,26 @@ from std.math import isnan
 from std.sys.info import simd_width_of
 
 from mojagg.core.numeric import nan_or_zero
-from mojagg.core.tensor_view import TensorArg
-from mojagg.drivers.gufunc import GUFuncOperation
+from mojagg.drivers.guvectorize import (
+    CoreSpec,
+    Dim,
+    GUTensor,
+    GUFuncKernel,
+)
 
 
 @fieldwise_init
 struct GroupNanMean[
     value_t: DType,
     label_t: DType,
-](GUFuncOperation, ImplicitlyCopyable):
+](GUFuncKernel, ImplicitlyCopyable):
     """Accumulate sums and counts, then finalize each group mean."""
 
-    comptime Tensors = Tuple[
-        TensorArg[Self.value_t, False],
-        TensorArg[Self.label_t, False],
-        TensorArg[Self.value_t, True],
-        TensorArg[DType.int64, True],
+    comptime Signature = Tuple[
+        GUTensor[Self.value_t, False, CoreSpec[Dim[0]]],
+        GUTensor[Self.label_t, False, CoreSpec[Dim[0]]],
+        GUTensor[Self.value_t, True, CoreSpec[Dim[1]]],
+        GUTensor[DType.int64, True, CoreSpec[Dim[1]]],
     ]
 
     @always_inline
@@ -41,15 +45,12 @@ struct GroupNanMean[
         counts[unsafe_offset=label] += 1
 
     @always_inline
-    def apply(mut self, tensors: Self.Tensors):
-        var values_arg = tensors[0].copy()
-        var labels_arg = tensors[1].copy()
-        var output_arg = tensors[2].copy()
-        var counts_arg = tensors[3].copy()
-        var values = values_arg.read_span()
-        var labels = labels_arg.read_span()
-        var destination = output_arg.write_span()
-        var counts = counts_arg.write_span()
+    def __call__(mut self, tensors: Self.Signature):
+        var value_input, label_input, output, counts_output = tensors
+        var values = value_input.read_span()
+        var labels = label_input.read_span()
+        var destination = output.write_span()
+        var counts = counts_output.write_span()
 
         comptime width = simd_width_of[Self.value_t]() * 8
         var value_ptr = values.unsafe_ptr()

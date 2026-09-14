@@ -1,16 +1,20 @@
 """Grouped NaN-aware sum over aligned value and label cores.
 
-``GUFunc`` prepares one values core, one labels core, and one output core for
-each outer slice.  The operation only performs the grouped scatter for that
-slice; labels and values are expected to be aligned and equally long.
+``guvectorize`` prepares one values core, one labels core, and one output core
+for each outer slice.  The operation only performs the grouped scatter for
+that slice; labels and values are expected to be aligned and equally long.
 """
 
 from std.algorithm import vectorize
 from std.math import isnan, pow
 from std.sys.info import simd_width_of
 
-from mojagg.core.tensor_view import TensorArg
-from mojagg.drivers.gufunc import GUFuncOperation
+from mojagg.drivers.guvectorize import (
+    CoreSpec,
+    Dim,
+    GUTensor,
+    GUFuncKernel,
+)
 
 
 @fieldwise_init
@@ -18,13 +22,13 @@ struct GroupNanSum[
     value_t: DType,
     label_t: DType,
     power: Int,
-](GUFuncOperation, ImplicitlyCopyable):
+](GUFuncKernel, ImplicitlyCopyable):
     """Accumulate a compile-time power of valid values into dense groups."""
 
-    comptime Tensors = Tuple[
-        TensorArg[Self.value_t, False],
-        TensorArg[Self.label_t, False],
-        TensorArg[Self.value_t, True],
+    comptime Signature = Tuple[
+        GUTensor[Self.value_t, False, CoreSpec[Dim[0]]],
+        GUTensor[Self.label_t, False, CoreSpec[Dim[0]]],
+        GUTensor[Self.value_t, True, CoreSpec[Dim[1]]],
     ]
 
     @always_inline
@@ -49,13 +53,11 @@ struct GroupNanSum[
             destination[unsafe_offset=label] += pow(value, Self.power)
 
     @always_inline
-    def apply(mut self, tensors: Self.Tensors):
-        var values_arg = tensors[0].copy()
-        var labels_arg = tensors[1].copy()
-        var output_arg = tensors[2].copy()
-        var values = values_arg.read_span()
-        var labels = labels_arg.read_span()
-        var destination = output_arg.write_span()
+    def __call__(mut self, tensors: Self.Signature):
+        var value_input, label_input, output = tensors
+        var values = value_input.read_span()
+        var labels = label_input.read_span()
+        var destination = output.write_span()
 
         # Group scatter stores are scalar because each label selects an
         # arbitrary destination.  Load value/label pairs in SIMD blocks and

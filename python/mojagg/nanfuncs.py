@@ -236,7 +236,6 @@ count = nancount
 
 _NANQUANTILE_KERNELS = {
     np.dtype(np.float64): _native.nanquantile_f64,
-    np.dtype(np.float32): _native.nanquantile_f32,
 }
 
 
@@ -272,17 +271,7 @@ def nanquantile(a, quantiles, axis=None, **kwargs):
     if invalid:
         raise ValueError(f"quantiles must be in the range [0, 1], inclusive. Got {quantiles}.")
 
-    arr_val = np.asarray(a)
-    if not arr_val.dtype.isnative:
-        arr_val = arr_val.byteswap().view(arr_val.dtype.newbyteorder("="))
-
-    if arr_val.dtype not in (np.float32, np.float64):
-        if np.issubdtype(arr_val.dtype, np.floating) or np.issubdtype(arr_val.dtype, np.integer):
-            arr_val = arr_val.astype(np.float64)
-        else:
-            raise TypeError(
-                f"nanquantile does not support dtype {arr_val.dtype}; expected a numeric array"
-            )
+    arr_val = _selection_input(a)
 
     if arr_val.ndim == 0:
         arr_val = arr_val.reshape(1)

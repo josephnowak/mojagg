@@ -1,4 +1,4 @@
-"""NaN quantile/median operation for the generic GUFunc driver.
+"""NaN quantile/median operation for the guvectorize driver.
 
 The driver gives this operation a worker-local contiguous input scratch area.
 Sorting is allowed to mutate that private area while all outputs are still
@@ -12,16 +12,31 @@ from std.memory import alloc, dealloc
 from std.memory.alloc import Allocation, Layout
 
 from mojagg.core.numeric import nan_or_zero
-from mojagg.core.tensor_view import TensorArg
-from mojagg.drivers.gufunc import GUFuncOperation
+from mojagg.drivers.guvectorize import (
+    CoreSpec,
+    Dim,
+    GUTensor,
+    GUFuncKernel,
+)
 
 
-struct NanQuantileKernel[dtype: DType](GUFuncOperation, ImplicitlyCopyable):
+comptime QUANTILE_DIM = 1
+
+
+struct NanQuantileKernel[dtype: DType](GUFuncKernel, ImplicitlyCopyable):
     """Sort-based quantiles over one prepared core span."""
 
-    comptime Tensors = Tuple[
-        TensorArg[Self.dtype, False],
-        TensorArg[Self.dtype, True],
+    comptime Signature = Tuple[
+        GUTensor[
+            Self.dtype,
+            False,
+            CoreSpec[Dim[0]],
+        ],
+        GUTensor[
+            Self.dtype,
+            True,
+            CoreSpec[Dim[QUANTILE_DIM]],
+        ],
     ]
 
     var q_addr: Int
@@ -109,9 +124,8 @@ struct NanQuantileKernel[dtype: DType](GUFuncOperation, ImplicitlyCopyable):
                     )
 
     @always_inline
-    def apply(mut self, tensors: Self.Tensors):
-        var input = tensors[0].copy()
-        var output = tensors[1].copy()
+    def __call__(mut self, tensors: Self.Signature):
+        var input, output = tensors
         var source = input.read_span()
         self.ensure_workspace(len(source))
         var scratch = self.workspace_ptr()

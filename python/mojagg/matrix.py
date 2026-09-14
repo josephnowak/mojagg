@@ -30,11 +30,16 @@ def _matrix_func(arr: Any, is_corr: bool, func_name: str) -> np.ndarray:
         )
 
     orig_dtype = a.dtype
-    if orig_dtype not in (np.float32, np.float64):
+    if orig_dtype not in (np.dtype(np.float32), np.dtype(np.float64)):
         if not np.issubdtype(orig_dtype, np.number):
             raise TypeError(f"Unsupported dtype for matrix operation: {orig_dtype}")
-        a = a.astype(np.float64)
-        target_dtype = np.float64
+        if np.can_cast(orig_dtype, np.dtype(np.float32), casting="safe"):
+            target_dtype = np.dtype(np.float32)
+        elif np.can_cast(orig_dtype, np.dtype(np.float64), casting="same_kind"):
+            target_dtype = np.dtype(np.float64)
+        else:
+            raise TypeError(f"Unsupported dtype for matrix operation: {orig_dtype}")
+        a = a.astype(target_dtype)
     else:
         target_dtype = orig_dtype
 
@@ -49,10 +54,11 @@ def _matrix_func(arr: Any, is_corr: bool, func_name: str) -> np.ndarray:
     cfg = get_config()
     workers = cfg.threads if cfg.threads > 0 else (os.cpu_count() or 4)
     threshold = cfg.parallel_threshold
+    min_groups = cfg.parallel_min_groups
 
     kernel_dict = _CORR_KERNELS if is_corr else _COV_KERNELS
     kernel = kernel_dict[target_dtype]
-    kernel(a, out, batch, n_vars, n_obs, threshold, workers)
+    kernel(a, out, batch, n_vars, n_obs, threshold, workers, min_groups)
 
     return out
 

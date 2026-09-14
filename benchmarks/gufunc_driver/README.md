@@ -46,10 +46,11 @@ Reproduce: `bash benchmarks/gufunc_driver/run.sh` (inside the pixi env / WSL).
    ndreduce property). On contiguous input it is within ~5–40% of the
    specialized contiguous driver single-threaded; parallel closes the gap.
    A per-row `stride == 1` branch selects the SIMD kernel (SKILL.md §3.6).
-5. **Parallel needs a threshold**: on tiny rows, coarse chunked parallel is
+5. **Parallel needs two thresholds**: on tiny rows, coarse chunked parallel is
    2.9× *slower* than numbagg while fine-grained row-parallel is 2.1× faster.
-   `DispatchPolicy` must gate parallelism on `outer_count * n` and prefer
-   fine-grained flat-index decomposition (divmod fast-forward per task).
+   `DispatchPolicy` must gate parallelism on both the number of outer slices
+   and the size of each inner core, then prefer fine-grained flat-index
+   decomposition (divmod fast-forward per task).
 6. `mojagg-current`'s `ascontiguousarray` copy is visible on the strided
    case (142ms vs 101ms driver-only) — copies are banned from the real
    driver per SKILL.md §3.1.

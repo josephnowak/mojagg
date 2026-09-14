@@ -4,8 +4,12 @@ from std.algorithm import vectorize
 from std.math import isnan
 from std.sys.info import simd_width_of
 
-from mojagg.core.tensor_view import TensorArg
-from mojagg.drivers.gufunc import GUFuncOperation
+from mojagg.drivers.guvectorize import (
+    CoreSpec,
+    Dim,
+    GUTensor,
+    GUFuncKernel,
+)
 
 
 @fieldwise_init
@@ -13,13 +17,13 @@ struct GroupNanAnyAll[
     value_t: DType,
     label_t: DType,
     is_all: Bool,
-](GUFuncOperation, ImplicitlyCopyable):
+](GUFuncKernel, ImplicitlyCopyable):
     """Update group truth values while ignoring NaNs."""
 
-    comptime Tensors = Tuple[
-        TensorArg[Self.value_t, False],
-        TensorArg[Self.label_t, False],
-        TensorArg[Self.value_t, True],
+    comptime Signature = Tuple[
+        GUTensor[Self.value_t, False, CoreSpec[Dim[0]]],
+        GUTensor[Self.label_t, False, CoreSpec[Dim[0]]],
+        GUTensor[Self.value_t, True, CoreSpec[Dim[1]]],
     ]
 
     @always_inline
@@ -43,13 +47,11 @@ struct GroupNanAnyAll[
                 destination[unsafe_offset=label] = 1
 
     @always_inline
-    def apply(mut self, tensors: Self.Tensors):
-        var values_arg = tensors[0].copy()
-        var labels_arg = tensors[1].copy()
-        var output_arg = tensors[2].copy()
-        var values = values_arg.read_span()
-        var labels = labels_arg.read_span()
-        var destination = output_arg.write_span()
+    def __call__(mut self, tensors: Self.Signature):
+        var value_input, label_input, output = tensors
+        var values = value_input.read_span()
+        var labels = label_input.read_span()
+        var destination = output.write_span()
 
         comptime width = simd_width_of[Self.value_t]() * 8
         var value_ptr = values.unsafe_ptr()

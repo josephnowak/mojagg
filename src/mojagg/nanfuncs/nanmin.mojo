@@ -1,4 +1,4 @@
-"""NaN-aware minimum and maximum operations for the native-tuple GUFunc."""
+"""NaN-aware minimum and maximum operations for the guvectorize driver."""
 
 from std.algorithm import vectorize
 from std.collections import Span
@@ -6,8 +6,12 @@ from std.math import isnan, max, min
 from std.sys.info import simd_width_of
 
 from mojagg.core.numeric import nan_or_zero, neg_inf_or_min, pos_inf_or_max
-from mojagg.core.tensor_view import TensorArg
-from mojagg.drivers.gufunc import GUFuncOperation
+from mojagg.drivers.guvectorize import (
+    CoreSpec,
+    Dim,
+    GUTensor,
+    GUFuncKernel,
+)
 
 
 @always_inline
@@ -81,20 +85,19 @@ struct NanExtrema[
     dtype: DType,
     is_min: Bool,
     result_dtype: DType = dtype,
-](GUFuncOperation, ImplicitlyCopyable):
+](GUFuncKernel, ImplicitlyCopyable):
     """Select the first finite minimum or maximum in one prepared core."""
 
     comptime value_dtype = Self.dtype
     comptime out_dtype = Self.result_dtype
-    comptime Tensors = Tuple[
-        TensorArg[Self.value_dtype, False],
-        TensorArg[Self.out_dtype, True],
+    comptime Signature = Tuple[
+        GUTensor[Self.value_dtype, False, CoreSpec[Dim[0]]],
+        GUTensor[Self.out_dtype, True, CoreSpec[]],
     ]
 
     @always_inline
-    def apply(mut self, tensors: Self.Tensors):
-        var input = tensors[0].copy()
-        var output = tensors[1].copy()
+    def __call__(mut self, tensors: Self.Signature):
+        var input, output = tensors
         var values = input.read_span()
         var state = nan_extreme_contiguous[Self.dtype, Self.is_min](values)
         if state[1] == 0.0:

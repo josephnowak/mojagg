@@ -1,28 +1,31 @@
 """Python bindings for the nanfuncs family.
 
 The binding validates the Python boundary once, borrows NumPy storage into
-typed ``LayoutTensor`` views, and invokes the canonical tuple-based GUFunc.
-All axis traversal, scratch materialization, and scheduling happen in Mojo.
+typed tensor views, and invokes the appropriate vectorization driver.  The
+nanfuncs use the combined-signature ``guvectorize`` driver.  All axis
+traversal, scratch materialization, and scheduling happen in Mojo.
 """
 
 from std.os import abort
 from std.python import PythonObject
 from std.python.bindings import PythonModuleBuilder
 
-from mojagg.core.tensor_view import (
-    DimArray as TensorDimArray,
+from mojagg.core.numeric import _dtype_name
+from mojagg.drivers.guvectorize import (
+    AxisSpec,
+    CoreSpec,
+    CoreSpecProtocol,
+    CoreBindings,
+    DimArray as VectorizeDimArray,
+    Dim,
+    DispatchPolicy as VectorizeDispatchPolicy,
+    GUFuncKernel,
+    build_signature_with_bindings,
+    build_signature,
+    GUTensor,
+    guvectorize,
     MAX_RANK,
-    TensorArg,
-    _dtype_name,
-)
-from mojagg.python.tensor_view_binding import (
-    read_tensor_from_numpy,
-    write_tensor_from_numpy,
-)
-from mojagg.drivers.gufunc import (
-    DispatchPolicy,
-    GUFunc,
-    GUFuncOperation,
+    MAX_RANK as VectorizeMaxRank,
 )
 from mojagg.nanfuncs.fill import FillKernel
 from mojagg.nanfuncs.allnan import AllNan
@@ -38,7 +41,7 @@ from mojagg.nanfuncs.nanmax import NanMax
 from mojagg.nanfuncs.nanmean import NanMean
 from mojagg.nanfuncs.nanmin import NanMin
 from mojagg.nanfuncs.nanprod import NanProd
-from mojagg.nanfuncs.nanquantile import NanQuantileKernel
+from mojagg.nanfuncs.nanquantile import NanQuantileKernel, QUANTILE_DIM
 from mojagg.nanfuncs.nansum import NanSum
 from mojagg.nanfuncs.nanvar import NanVar
 
@@ -48,32 +51,38 @@ from mojagg.nanfuncs.nanvar import NanVar
 # Contract: `axes` is a NORMALIZED Python tuple from the facade (deduped,
 # negatives resolved, stride-sorted descending, k >= 1); `out_arr` is a
 # preallocated numpy array of the op's result dtype; `threshold` is the
-# resolved MojaggConfig.parallel_threshold or MojaggConfig object.
+# resolved MojaggConfig fields or a legacy integer threshold.
 
 
 @always_inline
-def _cfg_params(cfg: PythonObject) raises -> Tuple[Int, Int]:
+def _cfg_params(cfg: PythonObject) raises -> Tuple[Int, Int, Int]:
     try:
         var t = Int(py=cfg.parallel_threshold)
         var w = Int(py=cfg.threads)
-        return (t, w)
+        var g = Int(py=cfg.parallel_min_groups)
+        return (t, w, g)
     except:
-        return (Int(py=cfg), 0)
+        return (Int(py=cfg), 0, 1)
 
 
 def _axes_from_py(
     axes: PythonObject, op: String
-) raises -> Tuple[TensorDimArray, Int]:
+) raises -> Tuple[VectorizeDimArray, Int]:
     """Read a normalized axes tuple into a fixed-capacity stack array."""
     var k = Int(py=axes.__len__())
     if k < 1 or k > MAX_RANK:
         raise Error(
             op + ": expected 1.." + String(MAX_RANK) + " axes, got " + String(k)
         )
-    var ax = TensorDimArray(fill=0)
+    var ax = VectorizeDimArray(fill=0)
     for i in range(k):
         ax[i] = Int(py=axes[i])
     return (ax^, k)
+
+
+def _axis_spec_from_py(axes: PythonObject, op: String) raises -> AxisSpec:
+    var parsed = _axes_from_py(axes, op)
+    return AxisSpec(parsed[0].copy(), parsed[1])
 
 
 def _validate_dtype[dtype: DType](arr: PythonObject, op: String) raises:
@@ -92,10 +101,91 @@ def _validate_output_dtype[dtype: DType](arr: PythonObject, op: String) raises:
         raise Error(op + ": output must be " + expected + ", got " + actual)
 
 
+def _guvectorize_tensor[
+    dtype: DType,
+    writable: Bool,
+    core: CoreSpecProtocol,
+](arr: PythonObject) raises -> GUTensor[dtype, writable, core]:
+    """Borrow one NumPy array as a ``GUTensor`` descriptor."""
+
+    var rank = Int(py=arr.ndim)
+    if rank < 0 or rank > VectorizeMaxRank:
+        raise Error("tensor rank exceeds guvectorize capacity")
+
+    var shape = VectorizeDimArray(fill=1)
+    var stride = VectorizeDimArray(fill=0)
+    var itemsize = Int(py=arr.dtype.itemsize)
+    if itemsize <= 0:
+        raise Error("tensor itemsize must be positive")
+    for axis in range(rank):
+        shape[axis] = Int(py=arr.shape[axis])
+        var byte_stride = Int(py=arr.strides[axis])
+        if byte_stride % itemsize != 0:
+            raise Error("array stride is not divisible by its itemsize")
+        stride[axis] = byte_stride // itemsize
+
+    return GUTensor[dtype, writable, core].borrow(
+        Int(py=arr.ctypes.data),
+        shape,
+        stride,
+        rank,
+    )
+
+
+def allocate_signature[
+    dtype: DType,
+    core: CoreSpecProtocol,
+](
+    planned: GUTensor[dtype, True, core],
+    out_arr: PythonObject,
+    op: String,
+) raises -> GUTensor[
+    dtype,
+    True,
+    core,
+]:
+    """Bind one Python-owned NumPy output to a planned signature tensor.
+
+    Allocation remains in the Python facade.  This generic boundary helper
+    validates the shape/layout described by ``build_signature`` and installs
+    the borrowed address without retaining a Python owner in Mojo.
+    """
+
+    var output = planned.copy()
+    var rank = Int(py=out_arr.ndim)
+    if rank != output.ndim:
+        raise Error(op + " output rank does not match its signature")
+
+    var itemsize = Int(py=out_arr.dtype.itemsize)
+    var has_zero_extent = False
+    for axis in range(rank):
+        var extent = Int(py=out_arr.shape[axis])
+        if extent != output.shape[axis]:
+            raise Error(op + " output shape does not match its signature")
+        if extent == 0:
+            has_zero_extent = True
+        var byte_stride = Int(py=out_arr.strides[axis])
+        if byte_stride % itemsize != 0:
+            raise Error(op + " output stride is not divisible by its itemsize")
+        if (
+            not has_zero_extent
+            and byte_stride // itemsize != output.stride[axis]
+        ):
+            raise Error(op + " output must be C-contiguous")
+
+    output.bind_address(Int(py=out_arr.ctypes.data), output.length)
+    return output^
+
+
+def _vectorize_policy(cfg: PythonObject) raises -> VectorizeDispatchPolicy:
+    var values = _cfg_params(cfg)
+    return VectorizeDispatchPolicy(values[1], values[0], values[2])
+
+
 def _apply_reduction[
     value_dtype: DType,
     out_dtype: DType,
-    Op: GUFuncOperation,
+    Op: GUFuncKernel,
 ](
     arr: PythonObject,
     axes: PythonObject,
@@ -104,49 +194,54 @@ def _apply_reduction[
     operation: Op,
     op_name: String,
 ) raises -> PythonObject:
-    """Run one concrete tuple operation over normalized reduction axes."""
+    """Run one scalar reduction through the guvectorize driver."""
 
     _validate_dtype[value_dtype](arr, op_name)
     _validate_output_dtype[out_dtype](out_arr, op_name)
-    var input_tensor = read_tensor_from_numpy[value_dtype](arr)
-    var output_tensor = write_tensor_from_numpy[out_dtype](out_arr)
-    var input_ndim = Int(py=arr.ndim)
-    var output_ndim = Int(py=out_arr.ndim)
-    var parsed = _axes_from_py(axes, op_name)
-    var tensors = Tuple(
-        TensorArg[value_dtype, False].from_read_tensor(
-            input_tensor,
-            input_ndim,
-            Int(py=arr.ctypes.data),
-        ),
-        TensorArg[out_dtype, True].from_write_tensor(
-            output_tensor,
-            output_ndim,
-            Int(py=out_arr.ctypes.data),
-        ),
+    var input = _guvectorize_tensor[
+        value_dtype,
+        False,
+        CoreSpec[Dim[0]],
+    ](arr)
+    var parsed = _axis_spec_from_py(axes, op_name)
+    var template = Tuple(
+        input,
+        GUTensor[
+            out_dtype,
+            True,
+            CoreSpec[],
+        ].empty(),
     )
-    var driver = GUFunc[Op](operation)
-    var output_axes = TensorDimArray(fill=0)
-    driver.execute(
-        tensors,
-        parsed[0],
-        parsed[1],
-        output_axes,
-        0,
-        _policy(cfg),
+    var planned = build_signature[Op](
+        template,
+        parsed,
+        AxisSpec.empty(),
+    )
+    var input_view, planned_output = planned
+    var output_view = allocate_signature[
+        out_dtype,
+        CoreSpec[],
+    ](planned_output, out_arr, op_name)
+    var signature = Tuple(input_view, output_view)
+    guvectorize[Op](
+        operation,
+        signature,
+        parsed,
+        AxisSpec.empty(),
+        _vectorize_policy(cfg),
     )
     return out_arr
 
 
 def _apply_matrix[
     value_dtype: DType,
-    Op: GUFuncOperation,
+    Op: GUFuncKernel,
 ](
     arr: PythonObject,
     out_arr: PythonObject,
     n_vars: Int,
     n_obs: Int,
-    policy: DispatchPolicy,
+    policy: VectorizeDispatchPolicy,
     operation: Op,
     op_name: String,
 ) raises -> PythonObject:
@@ -154,39 +249,37 @@ def _apply_matrix[
 
     _validate_dtype[value_dtype](arr, op_name)
     _validate_output_dtype[value_dtype](out_arr, op_name)
-    var input_tensor = read_tensor_from_numpy[value_dtype](arr)
-    var output_tensor = write_tensor_from_numpy[value_dtype](out_arr)
     var input_ndim = Int(py=arr.ndim)
     var output_ndim = Int(py=out_arr.ndim)
     if input_ndim < 2 or output_ndim < 2:
         raise Error(op_name + " requires at least two dimensions")
 
-    var input_axes = TensorDimArray(fill=0)
+    var input = _guvectorize_tensor[
+        value_dtype,
+        False,
+        CoreSpec[Dim[0], Dim[1]],
+    ](arr)
+    var output = _guvectorize_tensor[
+        value_dtype,
+        True,
+        CoreSpec[Dim[0], Dim[0]],
+    ](out_arr)
+    var input_axes = AxisSpec.empty()
+    input_axes.count = 2
     input_axes[0] = input_ndim - 2
     input_axes[1] = input_ndim - 1
-    var output_axes = TensorDimArray(fill=0)
+    var output_axes = AxisSpec.empty()
+    output_axes.count = 2
     output_axes[0] = output_ndim - 2
     output_axes[1] = output_ndim - 1
-    var tensors = Tuple(
-        TensorArg[value_dtype, False].from_read_tensor(
-            input_tensor,
-            input_ndim,
-            Int(py=arr.ctypes.data),
-        ),
-        TensorArg[value_dtype, True].from_write_tensor(
-            output_tensor,
-            output_ndim,
-            Int(py=out_arr.ctypes.data),
-        ),
+    guvectorize[Op](
+        operation,
+        Tuple(input, output),
+        input_axes,
+        output_axes,
+        policy,
     )
-    var driver = GUFunc[Op](operation)
-    driver.execute(tensors, input_axes, 2, output_axes, 2, policy)
     return out_arr
-
-
-def _policy(cfg: PythonObject) raises -> DispatchPolicy:
-    var values = _cfg_params(cfg)
-    return DispatchPolicy(values[1], values[0])
 
 
 def allnan_binding[
@@ -382,32 +475,24 @@ def _apply_fill[
 ) raises -> PythonObject:
     _validate_dtype[dtype](arr, op_name)
     _validate_output_dtype[dtype](out_arr, op_name)
-    var input_tensor = read_tensor_from_numpy[dtype](arr)
-    var output_tensor = write_tensor_from_numpy[dtype](out_arr)
-    var input_ndim = Int(py=arr.ndim)
-    var output_ndim = Int(py=out_arr.ndim)
-    var parsed = _axes_from_py(axes, op_name)
-    var tensors = Tuple(
-        TensorArg[dtype, False].from_read_tensor(
-            input_tensor,
-            input_ndim,
-            Int(py=arr.ctypes.data),
-        ),
-        TensorArg[dtype, True].from_write_tensor(
-            output_tensor,
-            output_ndim,
-            Int(py=out_arr.ctypes.data),
-        ),
-    )
+    var input = _guvectorize_tensor[
+        dtype,
+        False,
+        CoreSpec[Dim[0]],
+    ](arr)
+    var output = _guvectorize_tensor[
+        dtype,
+        True,
+        CoreSpec[Dim[0]],
+    ](out_arr)
+    var parsed = _axis_spec_from_py(axes, op_name)
     var operation = FillKernel[dtype, backward](limit=Int(py=limit))
-    var driver = GUFunc[FillKernel[dtype, backward]](operation)
-    driver.execute(
-        tensors,
-        parsed[0],
-        parsed[1],
-        parsed[0],
-        parsed[1],
-        _policy(cfg),
+    guvectorize[FillKernel[dtype, backward]](
+        operation,
+        Tuple(input, output),
+        parsed,
+        parsed,
+        _vectorize_policy(cfg),
     )
     return out_arr
 
@@ -450,10 +535,13 @@ def nancovmatrix_binding[
     n_obs: PythonObject,
     threshold: PythonObject,
     workers: PythonObject,
+    parallel_min_groups: PythonObject,
 ) raises -> PythonObject:
     if Int(py=batch) == 0:
         return out_arr
-    var policy = DispatchPolicy(Int(py=workers), Int(py=threshold))
+    var policy = VectorizeDispatchPolicy(
+        Int(py=workers), Int(py=threshold), Int(py=parallel_min_groups)
+    )
     var operation = NanCovOp[dtype](
         Int(py=n_vars),
         Int(py=n_obs),
@@ -479,10 +567,13 @@ def nancorrmatrix_binding[
     n_obs: PythonObject,
     threshold: PythonObject,
     workers: PythonObject,
+    parallel_min_groups: PythonObject,
 ) raises -> PythonObject:
     if Int(py=batch) == 0:
         return out_arr
-    var policy = DispatchPolicy(Int(py=workers), Int(py=threshold))
+    var policy = VectorizeDispatchPolicy(
+        Int(py=workers), Int(py=threshold), Int(py=parallel_min_groups)
+    )
     var operation = NanCorrOp[dtype](
         Int(py=n_vars),
         Int(py=n_obs),
@@ -509,36 +600,46 @@ def nanquantile_binding[
 ) raises -> PythonObject:
     _validate_dtype[dtype](arr, "nanquantile")
     _validate_output_dtype[dtype](out_arr, "nanquantile")
-    var input_tensor = read_tensor_from_numpy[dtype](arr)
-    var output_tensor = write_tensor_from_numpy[dtype](out_arr)
-    var input_ndim = Int(py=arr.ndim)
     var output_ndim = Int(py=out_arr.ndim)
-    var t = _axes_from_py(axes, "nanquantile")
+    var input = _guvectorize_tensor[
+        dtype,
+        False,
+        CoreSpec[Dim[0]],
+    ](arr)
+    var parsed = _axis_spec_from_py(axes, "nanquantile")
     var q_addr = Int(py=quantiles_arr.ctypes.data)
     var num_q = Int(py=quantiles_arr.__len__())
-    var policy = _policy(cfg)
-    var tensors = Tuple(
-        TensorArg[dtype, False].from_read_tensor(
-            input_tensor,
-            input_ndim,
-            Int(py=arr.ctypes.data),
-        ),
-        TensorArg[dtype, True].from_write_tensor(
-            output_tensor,
-            output_ndim,
-            Int(py=out_arr.ctypes.data),
-        ),
-    )
-    var operation = NanQuantileKernel[dtype](q_addr, num_q)
-    var driver = GUFunc[NanQuantileKernel[dtype]](operation)
-    var output_axes = TensorDimArray(fill=0)
+    var policy = _vectorize_policy(cfg)
+    var output_axes = AxisSpec.empty()
+    output_axes.count = 1
     output_axes[0] = output_ndim - 1
-    driver.execute(
-        tensors,
-        t[0],
-        t[1],
+    var bindings = CoreBindings.empty()
+    bindings.bind(QUANTILE_DIM, num_q)
+    var template = Tuple(
+        input,
+        GUTensor[
+            dtype,
+            True,
+            CoreSpec[Dim[QUANTILE_DIM]],
+        ].empty(),
+    )
+    var planned = build_signature_with_bindings[NanQuantileKernel[dtype]](
+        template,
+        parsed,
         output_axes,
-        1,
+        bindings,
+    )
+    var input_view, planned_output = planned
+    var output_view = allocate_signature[
+        dtype,
+        CoreSpec[Dim[QUANTILE_DIM]],
+    ](planned_output, out_arr, "nanquantile")
+    var operation = NanQuantileKernel[dtype](q_addr, num_q)
+    guvectorize[NanQuantileKernel[dtype]](
+        operation,
+        Tuple(input_view, output_view),
+        parsed,
+        output_axes,
         policy,
     )
     return out_arr
@@ -630,7 +731,6 @@ def PyInit_nanfuncs_native() abi("C") -> PythonObject:
         )
 
         m.def_function[nanquantile_binding[DType.float64]]("nanquantile_f64")
-        m.def_function[nanquantile_binding[DType.float32]]("nanquantile_f32")
 
         return m.finalize()
     except e:

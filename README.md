@@ -1,5 +1,19 @@
 # mojagg
 
+## Development workflow
+
+Development on Windows always runs through Ubuntu WSL. Use the single wrapper
+for setup, source discovery, compilation, tests, linting, and benchmarks:
+
+```powershell
+powershell.exe -NoProfile -ExecutionPolicy Bypass -File scripts/mojagg.ps1 install
+powershell.exe -NoProfile -ExecutionPolicy Bypass -File scripts/mojagg.ps1 doctor
+powershell.exe -NoProfile -ExecutionPolicy Bypass -File scripts/mojagg.ps1 test
+```
+
+The wrapper scopes normal source searches to `python/`, `src/`, and `tests/`.
+See `.agents/skills/mojagg-workflow/SKILL.md` for the AI workflow.
+
 **NaN-aware aggregations, grouped reductions, and rolling windows — numbagg's API, Mojo's speed.**
 
 ```python
@@ -35,7 +49,7 @@ differential wrappers. Supported operations must match numbagg's values,
 shapes, dtypes and exception types; missing numbagg is an error, not a skip.
 `nanprod` has no standalone numbagg equivalent and is explicitly NumPy-only.
 
-`pixi run bench-reference --save comparison.json` compares public APIs using
+`powershell.exe -NoProfile -ExecutionPolicy Bypass -File scripts/mojagg.ps1 bench-reference --save comparison.json` compares public APIs using
 the same upstream inputs, with correctness checks and JIT warmup before timing.
 Add `--full` for million-element matrices, or `--ops nanmean nansum` to narrow
 the run. Reports include fixture commit, runtime numbagg/NumPy versions, thread
@@ -58,7 +72,7 @@ development measurements, not native-Linux dispatch calibration.
 | `group_nansum` (1e7 rows, 1e4 groups) | 1.0× (groupies) | 15× | **TBD** | TBD |
 | `move_mean` (1e7 f64, w=100) | — | 20× | **TBD** | TBD |
 
-Run them: `python benchmarks/full_matrix.py` · Continuous per-PR performance tracking via [CodSpeed](https://codspeed.io).
+Run them: `powershell.exe -NoProfile -ExecutionPolicy Bypass -File scripts/mojagg.ps1 bench-full` · Continuous per-PR performance tracking via [CodSpeed](https://codspeed.io).
 
 ### GUFunc driver
 
@@ -77,23 +91,23 @@ borrowed directly, and writable tensors always point at the caller's
 C-contiguous output, so no output copy-back is needed. Operation-owned
 temporary workspaces are held by the operation and copied once per worker.
 
-`DispatchPolicy` compares the largest read core with the configured inner-loop
-threshold before launching `parallelize`, and caps workers at the number of
-outer slices. A single worker or a below-threshold core stays on the serial
-path. This keeps the hot `apply` method independent of ndim, axes, strides,
-scratch management, and scheduling while allowing each operation to use its
-contiguous SIMD implementation.
+`DispatchPolicy` launches `parallelize` only when the outer loop has at least
+`parallel_min_groups` slices and the largest read core has at least
+`parallel_threshold` elements. It caps workers at the number of outer slices;
+a single worker or either below-threshold condition stays on the serial path.
+This keeps the hot `apply` method independent of ndim, axes, strides, scratch
+management, and scheduling while allowing each operation to use its contiguous
+SIMD implementation.
 
-Run `pixi run test-mojo` for the native tuple and scratch-path smoke tests, and
-`pixi run test` for Python parity against numbagg.
+Run `powershell.exe -NoProfile -ExecutionPolicy Bypass -File scripts/mojagg.ps1 test-mojo` for the native tuple and scratch-path smoke tests, and
+`powershell.exe -NoProfile -ExecutionPolicy Bypass -File scripts/mojagg.ps1 test-python` for Python parity against numbagg.
 `benchmarks/reduction_contract.py` times the native boundary with allocations
 and reference calculations excluded:
 
-```bash
-pixi run build-ext
-PYTHONPATH=python pixi run python benchmarks/reduction_contract.py --save before.json
+```powershell
+powershell.exe -NoProfile -ExecutionPolicy Bypass -File scripts/mojagg.ps1 reduction-contract --save before.json
 # Preserve a copy of the built extension before editing, then rebuild.
-PYTHONPATH=python pixi run python benchmarks/reduction_contract.py --baseline-library before.so --save paired.json
+powershell.exe -NoProfile -ExecutionPolicy Bypass -File scripts/mojagg.ps1 reduction-contract --baseline-library before.so --save paired.json
 ```
 
 The paired mode alternates old/new libraries on identical inputs, checks equal
@@ -153,14 +167,16 @@ Grouped operations expect dense, non-negative factorization labels.
 ## Configuration
 
 ```python
-with mojagg.config(parallel_threshold=50_000, threads=8):
+with mojagg.config(parallel_threshold=50_000, parallel_min_groups=64, threads=8):
     mojagg.group_nansum(values, labels)
 
 mojagg.set_config(backend="cpu")  # global
 # or env: MOJAGG_PARALLEL_THRESHOLD=50000 MOJAGG_THREADS=8
 ```
 
-Context manager > global > env var > tuned defaults (benchmark-derived).
+Parallel dispatch requires both thresholds: enough outer slices and enough
+elements in each input core. Context manager > global > env var > tuned
+defaults (benchmark-derived).
 
 ## Philosophy
 

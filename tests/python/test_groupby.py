@@ -235,6 +235,27 @@ GROUPED_REST_FUNCTIONS = [
     "group_nanstd",
 ]
 
+GROUPED_BOOL_FUNCTIONS = [
+    "group_nansum",
+    "group_nanprod",
+    "group_nancount",
+    "group_nansum_of_squares",
+    "group_nanmean",
+    "group_nanmin",
+    "group_nanmax",
+    "group_nanargmin",
+    "group_nanargmax",
+    "group_nanfirst",
+    "group_nanlast",
+    "group_nanany",
+    "group_nanall",
+]
+
+GROUPED_BOOL_UNSUPPORTED_FUNCTIONS = [
+    "group_nanvar",
+    "group_nanstd",
+]
+
 
 def _numbagg_group_result(function_name, values, labels, **kwargs):
     import numbagg
@@ -317,4 +338,127 @@ def test_group_remaining_functions_multiaxis_parity(function_name):
     expected = _numbagg_group_result(function_name, values, labels, **kwargs)
 
     assert actual.shape == expected.shape
+    np.testing.assert_allclose(actual, expected, equal_nan=True)
+
+
+@pytest.mark.parametrize("function_name", GROUPED_BOOL_FUNCTIONS)
+def test_group_boolean_input_parity(function_name):
+    values = np.array([True, False, True, False, True], dtype=np.bool_)
+    labels = np.array([0, 0, -1, 2, 3], dtype=np.int32)
+
+    actual = getattr(mojagg, function_name)(values, labels, num_labels=5)
+    expected = _numbagg_group_result(
+        function_name,
+        values,
+        labels,
+        num_labels=5,
+    )
+
+    assert actual.dtype == expected.dtype
+    np.testing.assert_allclose(actual, expected, equal_nan=True)
+
+
+@pytest.mark.parametrize("function_name", GROUPED_BOOL_UNSUPPORTED_FUNCTIONS)
+def test_group_boolean_input_rejected_for_float_only_functions(function_name):
+    values = np.array([True, False], dtype=np.bool_)
+    labels = np.array([0, 1], dtype=np.int32)
+
+    with pytest.raises(TypeError, match="does not support boolean input"):
+        getattr(mojagg, function_name)(values, labels, num_labels=2)
+
+
+@pytest.mark.parametrize("dtype", [np.int32, np.int64])
+def test_group_nanmean_integer_input_matches_generic_signature(dtype):
+    values = np.array([3, 2, -2, 5, 1], dtype=dtype)
+    labels = np.array([0, 0, 1, 1, 2], dtype=np.int32)
+
+    actual = mojagg.group_nanmean(values, labels, num_labels=4)
+    expected = _numbagg_group_result(
+        "group_nanmean",
+        values,
+        labels,
+        num_labels=4,
+    )
+
+    assert actual.dtype == expected.dtype
+    np.testing.assert_allclose(actual, expected, equal_nan=True)
+
+
+@pytest.mark.parametrize(
+    "function_name",
+    [
+        "group_nanmin",
+        "group_nanmax",
+        "group_nanargmin",
+        "group_nanargmax",
+    ],
+)
+def test_group_extrema_ties_and_all_nan_parity(function_name):
+    values = np.array([5.0, 5.0, np.nan, -1.0, np.nan, 2.0])
+    labels = np.array([0, 0, 1, 1, 2, 3], dtype=np.int64)
+
+    actual = getattr(mojagg, function_name)(values, labels, num_labels=4)
+    expected = _numbagg_group_result(
+        function_name,
+        values,
+        labels,
+        num_labels=4,
+    )
+
+    assert actual.dtype == expected.dtype
+    np.testing.assert_allclose(actual, expected, equal_nan=True)
+
+
+@pytest.mark.parametrize("function_name", ["group_nanfirst", "group_nanlast"])
+def test_group_first_last_skip_nan_and_negative_labels(function_name):
+    values = np.array([np.nan, 4.0, 2.0, np.nan, 7.0])
+    labels = np.array([0, 0, 0, -1, 2], dtype=np.int32)
+
+    actual = getattr(mojagg, function_name)(values, labels, num_labels=4)
+    expected = _numbagg_group_result(
+        function_name,
+        values,
+        labels,
+        num_labels=4,
+    )
+
+    np.testing.assert_allclose(actual, expected, equal_nan=True)
+
+
+@pytest.mark.parametrize("function_name", ["group_nanany", "group_nanall"])
+def test_group_any_all_nan_and_empty_group_parity(function_name):
+    values = np.array([np.nan, 0.0, 1.0, np.nan])
+    labels = np.array([0, 1, 1, 2], dtype=np.int64)
+
+    actual = getattr(mojagg, function_name)(values, labels, num_labels=4)
+    expected = _numbagg_group_result(
+        function_name,
+        values,
+        labels,
+        num_labels=4,
+    )
+
+    np.testing.assert_allclose(actual, expected, equal_nan=True)
+
+
+@pytest.mark.parametrize("ddof", [0, 1, 2, 4])
+@pytest.mark.parametrize("function_name", ["group_nanvar", "group_nanstd"])
+def test_group_variance_ddof_boundaries_parity(function_name, ddof):
+    values = np.array([1.0, 3.0, np.nan, 8.0, 10.0])
+    labels = np.array([0, 0, 1, 1, 2], dtype=np.int32)
+
+    actual = getattr(mojagg, function_name)(
+        values,
+        labels,
+        ddof=ddof,
+        num_labels=4,
+    )
+    expected = _numbagg_group_result(
+        function_name,
+        values,
+        labels,
+        ddof=ddof,
+        num_labels=4,
+    )
+
     np.testing.assert_allclose(actual, expected, equal_nan=True)
