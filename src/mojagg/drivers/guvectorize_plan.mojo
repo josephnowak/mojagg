@@ -1,4 +1,17 @@
-"""Signature planning and broadcast resolution for guvectorize."""
+"""Signature planning and outer broadcast resolution for ``guvectorize``.
+
+This module is the boundary between a complete tensor descriptor and one
+prepared core invocation. It first binds the compile-time ``CoreSpec`` symbols
+from input shapes, then removes selected physical core axes to form outer
+shapes. Input outer shapes are right-aligned and broadcast like NumPy. Outputs
+must have the resolved outer rank and shape exactly because duplicating a
+writable destination would make ownership ambiguous.
+
+The planner does not copy ordinary inputs. It records element strides and
+marks a read core for scratch only when its selected axes are not contiguous in
+the requested logical order. Writable cores are rejected at plan time when
+they cannot be consumed as a direct contiguous span.
+"""
 
 from std.collections import InlineArray
 
@@ -17,6 +30,8 @@ from mojagg.drivers.guvectorize_spec import (
 
 @fieldwise_init
 struct BroadcastDomain(Copyable):
+    """The common right-aligned outer domain of the read inputs."""
+
     var rank: Int
     var count: Int
     var shape: DimArray
@@ -24,6 +39,8 @@ struct BroadcastDomain(Copyable):
 
 @fieldwise_init
 struct GUVectorizePlan[NUM_TENSORS: Int](Copyable):
+    """One complete layout plan shared by all outer-slice workers."""
+
     var outer_rank: Int
     var outer_count: Int
     var outer_shape: DimArray
@@ -35,6 +52,12 @@ struct GUVectorizePlan[NUM_TENSORS: Int](Copyable):
     ](
         plans: InlineArray[OperandPlan, Self.NUM_TENSORS],
     ) raises -> BroadcastDomain:
+        """Resolve only input outer shapes using right-aligned broadcasting.
+
+        Outputs are deliberately excluded here. They are checked against the
+        resulting domain in ``build`` so a writable operand can never silently
+        broadcast into multiple destinations.
+        """
         comptime assert len(Args) == Self.NUM_TENSORS
 
         var common_rank = 0
@@ -70,6 +93,7 @@ struct GUVectorizePlan[NUM_TENSORS: Int](Copyable):
         input_axes: AxisSpec,
         output_axes: AxisSpec,
     ) raises -> OperandPlan:
+        """Split one tensor into selected core and remaining outer metadata."""
         # Mojo's variadic trait pack exposes only trait members.  Rebind the
         # concrete element so the planner can read the public shape/stride
         # fields directly instead of adding shape_at/stride_at accessors.
@@ -157,6 +181,7 @@ struct GUVectorizePlan[NUM_TENSORS: Int](Copyable):
         input_axes: AxisSpec,
         output_axes: AxisSpec,
     ) raises -> Self:
+        """Build the executable plan and validate every writable layout."""
         comptime assert len(Args) == Self.NUM_TENSORS
         comptime assert Self.NUM_TENSORS > 1
 
@@ -254,6 +279,7 @@ def validate_core_symbol(symbol: Int) raises:
 def bind_core_dimensions[
     Spec: CoreSpecProtocol,
 ](mut bindings: CoreBindings, logical_core_shape: DimArray,) raises:
+    """Bind or validate each symbolic/fixed dimension in a logical core."""
     var core_values = Spec.values()
     var core_fixed = Spec.fixed()
     comptime for core_axis in range(Spec.rank):
@@ -269,6 +295,7 @@ def bind_core_dimensions[
 def resolve_core_dimensions[
     Spec: CoreSpecProtocol,
 ](bindings: CoreBindings,) raises -> DimArray:
+    """Materialize an output core shape from fixed and bound dimensions."""
     var result = DimArray(fill=1)
     var core_values = Spec.values()
     var core_fixed = Spec.fixed()
@@ -293,7 +320,13 @@ def _build_signature[
     output_axes: AxisSpec,
     initial_bindings: CoreBindings,
 ) raises -> Tuple[*Args]:
-    """Resolve a kernel signature and create metadata-only output views."""
+    """Resolve input core symbols and create metadata-only output views.
+
+    A rank-one ``CoreSpec[Dim[id]]`` can consume several selected input axes;
+    in that reduction form the selected extents are multiplied and bound as
+    one logical dimension. Multi-dimensional core specs instead bind each
+    selected axis in order.
+    """
 
     comptime assert (
         Operation.Signature == Tuple[*Args]
@@ -412,7 +445,11 @@ def build_signature_with_bindings[
     output_axes: AxisSpec,
     initial_bindings: CoreBindings,
 ) raises -> Tuple[*Args]:
-    """Resolve a signature with caller-provided symbolic dimensions."""
+    """Resolve a signature while seeding symbols from an external dimension.
+
+    Quantile uses this form because the output core length comes from the
+    separate quantile array rather than from an input tensor core.
+    """
 
     return _build_signature[Operation, *Args](
         tensors,

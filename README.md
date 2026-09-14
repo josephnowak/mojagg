@@ -76,28 +76,19 @@ Run them: `powershell.exe -NoProfile -ExecutionPolicy Bypass -File scripts/mojag
 
 ### GUFunc driver
 
-Every nanfunc operation declares one fixed-arity native Mojo tuple and exposes
-only `apply(tensors)`. For example, a reduction declares
-`Tuple[TensorArg[dtype, False], TensorArg[out_dtype, True]]`. Dtypes and
-read/write capabilities are compile-time specializations; there is no boxed
-runtime dtype dispatch. `TensorTuple` is only an alias for Mojo's native
-`Tuple[*Args]`, not a wrapper.
+Every operation declares one fixed-arity native tuple of typed `GUTensor`
+descriptors. Dtypes, read/write capabilities, and core dimensions are
+compile-time specializations; there is no boxed runtime dtype dispatch. The
+binding resolves symbolic core sizes, the driver broadcasts only outer
+dimensions, and `GUFuncKernel.__call__` receives one prepared core per outer
+position. Non-contiguous read cores use worker-local scratch, while writable
+cores are validated for direct writes. `DispatchPolicy` parallelizes the outer
+slice domain only after both the outer-group and input-core thresholds pass.
 
-`GUFunc` validates ranks, outer shapes, selected axes, and output layout once.
-It then walks the outer index space in Mojo and passes each operation a
-one-dimensional core. A read core whose selected axes are not contiguous is
-copied into one preallocated scratch slot per worker. Contiguous reads are
-borrowed directly, and writable tensors always point at the caller's
-C-contiguous output, so no output copy-back is needed. Operation-owned
-temporary workspaces are held by the operation and copied once per worker.
-
-`DispatchPolicy` launches `parallelize` only when the outer loop has at least
-`parallel_min_groups` slices and the largest read core has at least
-`parallel_threshold` elements. It caps workers at the number of outer slices;
-a single worker or either below-threshold condition stays on the serial path.
-This keeps the hot `apply` method independent of ndim, axes, strides, scratch
-management, and scheduling while allowing each operation to use its contiguous
-SIMD implementation.
+See the full [guvectorize driver reference](docs/guvectorize.md) for the
+Numba gufunc model, `GUTensor` ownership, core-axis flattening, output layout,
+broadcasting examples, native binding flow, scratch behavior, and contribution
+rules.
 
 Run `powershell.exe -NoProfile -ExecutionPolicy Bypass -File scripts/mojagg.ps1 test-mojo` for the native tuple and scratch-path smoke tests, and
 `powershell.exe -NoProfile -ExecutionPolicy Bypass -File scripts/mojagg.ps1 test-python` for Python parity against numbagg.

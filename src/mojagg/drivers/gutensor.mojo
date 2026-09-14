@@ -1,4 +1,16 @@
-"""Non-owning tensor descriptors used by the guvectorize driver."""
+"""Non-owning tensor descriptors used by the ``guvectorize`` driver.
+
+``GUTensor`` stores an address and layout metadata; it never owns the NumPy
+allocation behind that address. A complete tensor descriptor is created at the
+Python boundary. During execution the driver copies the descriptor per worker
+and temporarily rebinds its address and ``length`` to one outer slice. The
+kernel consequently sees a typed contiguous span for its logical core.
+
+The descriptor's shape and stride arrays describe the original full tensor.
+Strides are measured in elements. ``copy_core`` is the only place where a
+non-contiguous selected read core is materialized into worker-local storage.
+Writable cores are validated by the planner and never use this copy path.
+"""
 
 from std.collections import Span
 
@@ -49,12 +61,20 @@ struct GUTensor[
     output: Bool,
     core: CoreSpecProtocol,
 ](AnyGUTensor, ImplicitlyCopyable):
-    """A non-owning tensor descriptor for one gufunc operand."""
+    """A non-owning descriptor for one gufunc operand.
+
+    ``element_dtype``, ``output``, and ``core`` are compile-time properties.
+    ``address`` is a raw borrowed address; the descriptor does not keep a
+    Python owner alive. The binding must keep every participating Python array
+    alive until the synchronous native call returns.
+    """
 
     comptime dtype = Self.element_dtype
     comptime is_output = Self.output
     comptime core_spec = Self.core
 
+    # Full-tensor metadata. ``length`` becomes the active core length after
+    # execute_range rebinds this descriptor for one outer position.
     var address: Int
     var bound: Bool
     var shape: DimArray
@@ -190,6 +210,13 @@ struct GUTensor[
         outer_offset: Int,
         destination: Int,
     ):
+        """Copy one logical read core in AxisSpec order into ``destination``.
+
+        ``outer_offset`` already points at the selected outer coordinate. The
+        odometer below advances the last logical core axis fastest, matching
+        the order expected by a contiguous kernel span. The method is a no-op
+        for outputs because writable cores must already be contiguous.
+        """
         comptime if Self.output:
             return
         else:

@@ -40,12 +40,15 @@ struct GroupNanVarStd[
         label_value: Scalar[Self.label_t],
         value: Scalar[Self.value_t],
     ):
+        comptime assert (
+            Self.value_t == DType.float32 or Self.value_t == DType.float64
+        ), "group_nanvar and group_nanstd require float32 or float64"
+
         var label = Int(label_value)
         if label < 0:
             return
-        comptime if Self.value_t.is_floating_point():
-            if isnan(value):
-                return
+        if isnan(value):
+            return
         sums[unsafe_offset=label] += value
         sums_of_squares[unsafe_offset=label] += value * value
         counts[unsafe_offset=label] += 1

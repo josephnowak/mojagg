@@ -33,6 +33,7 @@ _REGISTERED_NAMES = [
     "ffill",
     "nancorrmatrix",
     "nancovmatrix",
+    "move_sum",
     "group_nancount",
     "group_nanall",
     "group_nanany",

@@ -1,4 +1,15 @@
-"""Outer-slice execution for the combined-signature guvectorize driver."""
+"""Outer-slice execution for the combined-signature ``guvectorize`` driver.
+
+The executor owns the hot outer loop. It computes one address per operand from
+the broadcast outer coordinate, copies only non-contiguous read cores into a
+64-byte-aligned worker-local scratch block, rebinds descriptors to the active
+core length, and calls the operation. Parallelism is over outer slices; one
+large core is never split by this generic driver.
+
+Each worker receives an independent operation copy, descriptor tuple, and
+scratch region. This makes mutable operation state safe for kernels such as
+quantile that sort or otherwise mutate worker-private storage.
+"""
 
 from max.algorithm import parallelize
 from std.memory import alloc, dealloc
@@ -44,6 +55,7 @@ def operand_requires_scratch[
 
 @always_inline
 def outer_offset(plan: OperandPlan, flat_outer: Int) -> Int:
+    """Convert a flat common outer index to an operand element offset."""
     var remaining = flat_outer
     var offset = 0
     for axis in range(plan.outer_rank - 1, -1, -1):
@@ -67,6 +79,7 @@ def execute_range[
     scratch_stride: Int,
     scratch_offsets: InlineArray[Int, len(Args)],
 ):
+    """Run a contiguous outer-index range with one worker's state."""
     # One descriptor copy per worker. The loop only rebinds its address and
     # active length for each outer slice.
     var local_tensors = tensors.copy()
@@ -104,6 +117,7 @@ def execute_serial_or_parallel[
     scratch_stride: Int,
     scratch_offsets: InlineArray[Int, len(Args)],
 ):
+    """Choose serial execution or copy state into parallel workers."""
     if tasks <= 1:
         var local_operation = operation.copy()
         execute_range[Operation, *Args](
@@ -160,7 +174,12 @@ def guvectorize[
     output_axes: AxisSpec,
     policy: DispatchPolicy,
 ) raises:
-    """Execute one combined-signature operation over all outer slices."""
+    """Plan and execute one combined-signature operation over outer slices.
+
+    Planning and scratch sizing happen once. The operation then receives a
+    tuple whose descriptors all refer to the same logical outer position and
+    whose writable cores are direct caller-owned spans.
+    """
 
     comptime assert (
         Operation.Signature == Tuple[*Args]

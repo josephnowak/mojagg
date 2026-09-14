@@ -3,6 +3,7 @@
 from std.atomic import Atomic
 from std.memory import alloc, dealloc
 from std.memory.alloc import Layout
+from std.math import isnan
 from std.sys.info import simd_width_of
 from std.testing import assert_equal, assert_raises
 
@@ -17,6 +18,8 @@ from mojagg.drivers.guvectorize import (
     build_signature,
     guvectorize,
 )
+from mojagg.core.numeric import nan_or_zero
+from mojagg.moving.move_sum import MoveSumKernel
 from mojagg.nanfuncs.nansum import NanSum
 
 
@@ -214,6 +217,93 @@ def test_guvectorize_nansum_power() raises:
     dealloc(source^)
     dealloc(destination^)
     assert_equal(result, expected)
+
+
+def test_guvectorize_move_sum_block_scan() raises:
+    """Exercise warm-up, delta blocks, NaNs, and both SIMD tail paths."""
+
+    comptime width = simd_width_of[DType.float64]()
+    var window = width + 1
+    var n = window + width + 3
+    var min_count = 3
+    var source = alloc(Layout[Float64](count=n))
+    var destination = alloc(Layout[Float64](count=n))
+    var expected = alloc(Layout[Float64](count=n))
+    var source_ptr = source.unsafe_ptr()
+    var destination_ptr = destination.unsafe_ptr()
+    var expected_ptr = expected.unsafe_ptr()
+    for i in range(n):
+        source_ptr[unsafe_offset=i] = Float64(i + 1)
+        destination_ptr[unsafe_offset=i] = -1.0
+    var nan = nan_or_zero[DType.float64]()
+    source_ptr[unsafe_offset=1] = nan
+    source_ptr[unsafe_offset=width] = nan
+    source_ptr[unsafe_offset=window] = nan
+    source_ptr[unsafe_offset=n - 2] = nan
+
+    # Scalar reference for the trailing partial-window contract.
+    var reference_sum = Float64(0)
+    var reference_count = 0
+    for i in range(n):
+        var entering = source_ptr[unsafe_offset=i]
+        if not isnan(entering):
+            reference_sum += entering
+            reference_count += 1
+        if i >= window:
+            var expiring = source_ptr[unsafe_offset=i - window]
+            if not isnan(expiring):
+                reference_sum -= expiring
+                reference_count -= 1
+        if reference_count >= min_count:
+            expected_ptr[unsafe_offset=i] = reference_sum
+        else:
+            expected_ptr[unsafe_offset=i] = nan
+
+    var shape = DimArray(fill=1)
+    shape[0] = n
+    var stride = DimArray(fill=0)
+    stride[0] = 1
+    var input = GUTensor[
+        DType.float64,
+        False,
+        CoreSpec[Dim[0]],
+    ].borrow(Int(source_ptr), shape, stride, 1)
+    var output = GUTensor[
+        DType.float64,
+        True,
+        CoreSpec[Dim[0]],
+    ].borrow(Int(destination_ptr), shape, stride, 1)
+    var axes_values = DimArray(fill=0)
+    axes_values[0] = 0
+    var axes = AxisSpec(axes_values.copy(), 1)
+    try:
+        guvectorize[MoveSumKernel[DType.float64]](
+            MoveSumKernel[DType.float64](window, min_count),
+            Tuple(input, output),
+            axes,
+            axes,
+            VectorizeDispatchPolicy(1, 0, 1),
+        )
+    except e:
+        dealloc(source^)
+        dealloc(destination^)
+        dealloc(expected^)
+        raise e
+
+    var all_ok = True
+    for i in range(n):
+        var got = destination_ptr[unsafe_offset=i]
+        var reference = expected_ptr[unsafe_offset=i]
+        if isnan(reference):
+            if not isnan(got):
+                all_ok = False
+        elif got != reference:
+            all_ok = False
+
+    dealloc(source^)
+    dealloc(destination^)
+    dealloc(expected^)
+    assert_equal(all_ok, True)
 
 
 def test_heterogeneous_tuple_and_input_scratch() raises:
@@ -598,6 +688,7 @@ def test_parallel_dispatch_requires_outer_and_inner_thresholds() raises:
 def main() raises:
     test_guvectorize_nansum()
     test_guvectorize_nansum_power()
+    test_guvectorize_move_sum_block_scan()
     test_heterogeneous_tuple_and_input_scratch()
     test_rejects_noncontiguous_writable_core()
     test_three_dimensional_outer_iterations()

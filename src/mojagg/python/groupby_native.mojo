@@ -687,19 +687,6 @@ def PyInit_groupby_native() abi("C") -> PythonObject:
         m.def_function[group_nanmean_binding[DType.float32, DType.int32]](
             "group_nanmean_f32_i32"
         )
-        m.def_function[group_nanmean_binding[DType.int64, DType.int64]](
-            "group_nanmean_i64_i64"
-        )
-        m.def_function[group_nanmean_binding[DType.int64, DType.int32]](
-            "group_nanmean_i64_i32"
-        )
-        m.def_function[group_nanmean_binding[DType.int32, DType.int64]](
-            "group_nanmean_i32_i64"
-        )
-        m.def_function[group_nanmean_binding[DType.int32, DType.int32]](
-            "group_nanmean_i32_i32"
-        )
-
         m.def_function[group_nanprod_binding[DType.float64, DType.int64]](
             "group_nanprod_f64_i64"
         )

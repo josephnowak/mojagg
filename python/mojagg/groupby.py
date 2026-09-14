@@ -21,7 +21,9 @@ _GROUP_VALUE_TYPES = (
     (np.dtype(np.int64), "i64"),
     (np.dtype(np.int32), "i32"),
 )
-_GROUP_FLOAT64_PROMOTIONS = {"group_nanvar", "group_nanstd"}
+# numbagg marks these grouped reductions as supports_ints=False.  Integer
+# values are promoted at this boundary so native kernels receive only f32/f64.
+_GROUP_FLOAT64_PROMOTIONS = {"group_nanmean", "group_nanvar", "group_nanstd"}
 _GROUP_FLOAT_VALUE_TYPES = _GROUP_VALUE_TYPES[:2]
 _GROUP_LABEL_TYPES = (
     (np.dtype(np.int64), "i64"),
@@ -67,7 +69,8 @@ _GROUP_KERNELS = {
     )
 }
 
-_GROUP_BOOL_SUPPORTED = set(_GROUP_KERNELS) - _GROUP_FLOAT64_PROMOTIONS
+_GROUP_BOOL_UNSUPPORTED = {"group_nanvar", "group_nanstd"}
+_GROUP_BOOL_SUPPORTED = set(_GROUP_KERNELS) - _GROUP_BOOL_UNSUPPORTED
 
 
 def _normalize_group_axes(values: np.ndarray, labels: np.ndarray, axis) -> tuple[int, ...]:
@@ -176,7 +179,10 @@ def _group_reduce(op_name, values, labels, axis=None, num_labels=None, *, ddof=1
         if np.issubdtype(result.dtype, np.floating):
             result.fill(np.nan)
         else:
-            result.fill(np.iinfo(result.dtype).min)
+            # Numbagg leaves unseen integer groups at zero.  The native
+            # kernel uses the seen workspace, so this value is only visible
+            # when a group receives no valid value.
+            result.fill(0)
     elif op_name in {
         "group_nanargmin",
         "group_nanargmax",

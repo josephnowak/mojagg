@@ -27,7 +27,7 @@ OUT_DIR = ROOT / "python" / "mojagg"  # where _native.py looks first
 EXT_SUFFIX = sysconfig.get_config_var("EXT_SUFFIX") or ".so"
 
 # Binding modules to compile (one per family).
-BINDINGS = ["nanfuncs_native", "groupby_native"]
+BINDINGS = ["nanfuncs_native", "groupby_native", "moving_native"]
 
 
 def get_target_mcpu() -> str | None:

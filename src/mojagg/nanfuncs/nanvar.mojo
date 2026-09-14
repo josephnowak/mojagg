@@ -21,6 +21,10 @@ def nan_squared_deviation_contiguous[
 ](values: Span[Scalar[dtype], ImmUntrackedOrigin], mean: Float64,) -> Float64:
     """Accumulate squared deviations with a float64 SIMD accumulator."""
 
+    comptime assert (
+        dtype == DType.float32 or dtype == DType.float64
+    ), "nanvar and nanstd require float32 or float64"
+
     comptime width = simd_width_of[dtype]() * 8
     var squared = SIMD[DType.float64, width](0.0)
     var zero = SIMD[DType.float64, width](0.0)
@@ -36,19 +40,14 @@ def nan_squared_deviation_contiguous[
             var block = pointer.unsafe_load[width=width](i)
             var widened = block.cast[DType.float64]()
             var delta = widened - mean_vector
-            comptime if dtype.is_floating_point():
-                squared += isnan(block).select(zero, delta * delta)
-            else:
-                squared += delta * delta
+            squared += isnan(block).select(zero, delta * delta)
         else:
             comptime for lane in range(width):
                 if lane < evl:
                     var value = pointer[unsafe_offset=i + lane]
-                    comptime if dtype.is_floating_point():
-                        if isnan(value):
-                            continue
-                    var delta = Float64(value) - mean
-                    squared[lane] += delta * delta
+                    if not isnan(value):
+                        var delta = Float64(value) - mean
+                        squared[lane] += delta * delta
 
     vectorize[width](len(values), step)
     return squared.reduce_add()

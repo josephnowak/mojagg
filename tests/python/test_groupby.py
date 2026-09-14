@@ -260,6 +260,12 @@ GROUPED_BOOL_UNSUPPORTED_FUNCTIONS = [
 def _numbagg_group_result(function_name, values, labels, **kwargs):
     import numbagg
 
+    if function_name == "group_nanmean" and not np.issubdtype(values.dtype, np.floating):
+        # The checked-in numbagg source marks group_nanmean as
+        # supports_ints=False. The locked 0.9.4 package predates that change
+        # and otherwise returns truncated integer means.
+        values = values.astype(np.float64)
+
     registered = mojagg.is_registered()
     mojagg.unregister()
     try:
@@ -278,7 +284,10 @@ def test_group_remaining_functions_parity(function_name, dtype, label_dtype):
     else:
         values = np.array([3, 2, -2, 4, 5, 1], dtype=dtype)
     labels = np.array([0, 0, 1, -1, 2, 1], dtype=label_dtype)
-    kwargs = {"num_labels": 4}
+    # Numbagg's NaN-to-integer sentinel for unseen groups is
+    # platform-dependent. Keep every integer group populated for parity.
+    num_labels = 3 if np.issubdtype(dtype, np.integer) else 4
+    kwargs = {"num_labels": num_labels}
     if function_name in {"group_nanvar", "group_nanstd"}:
         kwargs["ddof"] = 1
 
@@ -370,7 +379,7 @@ def test_group_boolean_input_rejected_for_float_only_functions(function_name):
 
 
 @pytest.mark.parametrize("dtype", [np.int32, np.int64])
-def test_group_nanmean_integer_input_matches_generic_signature(dtype):
+def test_group_nanmean_integer_input_promotes_to_float64(dtype):
     values = np.array([3, 2, -2, 5, 1], dtype=dtype)
     labels = np.array([0, 0, 1, 1, 2], dtype=np.int32)
 
@@ -382,6 +391,7 @@ def test_group_nanmean_integer_input_matches_generic_signature(dtype):
         num_labels=4,
     )
 
+    assert actual.dtype == np.dtype(np.float64)
     assert actual.dtype == expected.dtype
     np.testing.assert_allclose(actual, expected, equal_nan=True)
 

@@ -20,6 +20,10 @@ def nan_mean_contiguous[
 ](values: Span[Scalar[dtype], ImmUntrackedOrigin]) -> Tuple[Float64, Int64]:
     """Accumulate a contiguous core with float64 SIMD sum and count."""
 
+    comptime assert (
+        dtype == DType.float32 or dtype == DType.float64
+    ), "nanmean requires float32 or float64"
+
     comptime width = simd_width_of[dtype]() * 8
     var pointer = values.unsafe_ptr()
     var total = SIMD[DType.float64, width](0.0)
@@ -33,23 +37,14 @@ def nan_mean_contiguous[
         if evl == width:
             var block = pointer.unsafe_load[width=width](i)
             var widened = block.cast[DType.float64]()
-
-            comptime if dtype.is_floating_point():
-                var missing = isnan(block)
-                total += missing.select(zero, widened)
-                count += missing.select(zero, one)
-            else:
-                total += widened
-                count += one
+            var missing = isnan(block)
+            total += missing.select(zero, widened)
+            count += missing.select(zero, one)
         else:
             comptime for lane in range(width):
                 if lane < evl:
                     var value = pointer[unsafe_offset=i + lane]
-                    comptime if dtype.is_floating_point():
-                        if not isnan(value):
-                            total[lane] += Float64(value)
-                            count[lane] += 1.0
-                    else:
+                    if not isnan(value):
                         total[lane] += Float64(value)
                         count[lane] += 1.0
 

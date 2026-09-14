@@ -125,17 +125,22 @@ try:
 except ImportError:  # pragma: no cover
     groupby = None
 
+try:
+    moving = _load("moving_native")
+except ImportError:  # pragma: no cover
+    moving = None
+
 # Native binding entry points (thin; see facade for axis-aware public API).
 # Re-export every public binding (e.g. `nansum_f64`) at module scope so
 # facade code does `from mojagg import _native; _native.nansum_f64(...)`.
-for _module in (nanfuncs, groupby):
+for _module in (nanfuncs, groupby, moving):
     if _module is not None:
         for _name in dir(_module):
             if not _name.startswith("_"):
                 globals()[_name] = getattr(_module, _name)
 del _module
 
-if nanfuncs is None or groupby is None:  # pragma: no cover
+if nanfuncs is None or groupby is None or moving is None:  # pragma: no cover
 
     def __getattr__(name: str):
         raise ImportError("mojagg native extension not built. Run `pixi run build-ext`.")

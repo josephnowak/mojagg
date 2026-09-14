@@ -1,8 +1,11 @@
-"""Public façade for the combined-signature guvectorize driver.
+"""Public façade for the combined-signature ``guvectorize`` driver.
 
 The implementation is split across signature types, tensor descriptors,
 planning, and execution modules. Existing callers can continue importing the
-public driver surface from this module.
+public driver surface from this module. The complete behavioral contract is
+documented in ``docs/guvectorize.md``: a kernel receives one prepared core
+tuple, while this package handles symbolic dimensions, outer broadcasting,
+strided read scratch, writable-core validation, and worker scheduling.
 """
 
 from mojagg.core.dispatch import DispatchPolicy

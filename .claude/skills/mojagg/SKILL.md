@@ -42,6 +42,13 @@ The driver files are:
 | src/mojagg/drivers/guvectorize_execute.mojo | Outer iteration, worker-local scratch, operation copies, and dispatch |
 | src/mojagg/drivers/guvectorize.mojo | Public re-export surface for the driver |
 
+Read [docs/guvectorize.md](../../../docs/guvectorize.md) for the detailed
+driver reference. It is the concrete explanation of gufunc terminology,
+core/inner/outer dimensions, axis flattening, output placement, outer
+broadcasting, stride handling, scratch ownership, scheduling, and binding
+responsibilities. Keep this skill focused on contribution decisions and use
+the reference when reasoning about an implementation detail.
+
 The implemented operation families in this checkout are under
 src/mojagg/nanfuncs, src/mojagg/groupby, and the two native binding modules
 under src/mojagg/python. The Python facade also exposes static matrix and fill

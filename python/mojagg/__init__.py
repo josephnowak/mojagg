@@ -27,6 +27,7 @@ from mojagg.groupby import (
     group_nanvar,
 )
 from mojagg.matrix import nancorrmatrix, nancovmatrix
+from mojagg.moving import move_sum
 from mojagg.nanfuncs import (
     allnan,
     anynan,
@@ -75,6 +76,8 @@ __all__ = [
     # matrix
     "nancorrmatrix",
     "nancovmatrix",
+    # moving
+    "move_sum",
     # groupby
     "group_nanall",
     "group_nanany",

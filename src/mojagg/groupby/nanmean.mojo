@@ -35,12 +35,15 @@ struct GroupNanMean[
         label_value: Scalar[Self.label_t],
         value: Scalar[Self.value_t],
     ):
+        comptime assert (
+            Self.value_t == DType.float32 or Self.value_t == DType.float64
+        ), "group_nanmean requires float32 or float64"
+
         var label = Int(label_value)
         if label < 0:
             return
-        comptime if Self.value_t.is_floating_point():
-            if isnan(value):
-                return
+        if isnan(value):
+            return
         destination[unsafe_offset=label] += value
         counts[unsafe_offset=label] += 1
 
