@@ -39,11 +39,11 @@ class MojaggConfig:
 
     backend: str = "auto"  # "auto" | "cpu" | "gpu"
     threads: int = 0  # 0 = physical cores
-    # Parallel kicks in at outer_count x slice_len >= this many elements.
-    # Derived (2026-09, WSL2, 16 cores): max.algorithm.parallelize has ~0.5 ms
-    # fixed dispatch cost per FFI call there, so sub-ms work LOSES when
-    # parallel; ~2M elements ≈ ~2 ms serial scan. MUST be recalibrated on
-    # native Linux (CI/AWS runner) — WSL2 thread-wake latency inflates it.
+    # Parallel kicks in only when the outer loop has at least
+    # ``parallel_min_groups`` iterations and each input core has at least this
+    # many elements.
+    # Conservative placeholder pending native-Linux calibration of this
+    # per-core threshold; WSL2 thread-wake measurements are not portable.
     parallel_threshold: int = 2_000_000
     parallel_min_groups: int = 64
     gpu_min_bytes: int = 1 << 26  # 64 MiB
