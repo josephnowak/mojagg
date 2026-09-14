@@ -2,7 +2,6 @@ from __future__ import annotations
 
 import numpy as np
 import pytest
-
 from examples.gufunc_design.numpy_gufunc import apply_gufunc
 
 
@@ -19,9 +18,7 @@ def test_scalar_output_accepts_heterogeneous_core_lengths():
 
     expected = np.empty((2, 3), dtype=np.float64)
     for index in np.ndindex(expected.shape):
-        expected[index] = left[index].sum(dtype=np.float64) - right[index].sum(
-            dtype=np.float64
-        )
+        expected[index] = left[index].sum(dtype=np.float64) - right[index].sum(dtype=np.float64)
     np.testing.assert_array_equal(result, expected)
     assert len(seen) == 6
     assert all(shape == ((4,), (5,), np.dtype(np.float32), np.dtype(np.int32)) for shape in seen)
