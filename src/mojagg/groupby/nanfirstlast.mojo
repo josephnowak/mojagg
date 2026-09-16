@@ -8,15 +8,15 @@ from mojagg.drivers.guvectorize import (
     CoreSpec,
     Dim,
     GUTensor,
-    GUFuncKernel,
 )
+from mojagg.groupby.group_kernel import GroupKernel
 
 
 @fieldwise_init
 struct GroupNanFirst[
     value_t: DType,
     label_t: DType,
-](GUFuncKernel, ImplicitlyCopyable):
+](GroupKernel, ImplicitlyCopyable):
     """Write the first valid value observed by each group."""
 
     comptime Signature = Tuple[
@@ -93,7 +93,7 @@ struct GroupNanFirst[
 struct GroupNanLast[
     value_t: DType,
     label_t: DType,
-](GUFuncKernel, ImplicitlyCopyable):
+](GroupKernel, ImplicitlyCopyable):
     """Write the last valid value observed by each group."""
 
     comptime Signature = Tuple[

@@ -34,8 +34,8 @@ from mojagg.drivers.guvectorize_plan import (
     CoreBindings,
     GUVectorizePlan,
     bind_core_dimensions,
-    build_signature,
-    build_signature_with_bindings,
+    build_signature_plan,
+    build_signature_plan_with_bindings,
     resolve_core_dimensions,
     validate_core_symbol,
 )
@@ -48,4 +48,5 @@ from mojagg.drivers.guvectorize_spec import (
     Dim,
     FixedDim,
     GUFuncKernel,
+    empty_signature,
 )

@@ -8,6 +8,7 @@ from std.sys.info import simd_width_of
 from std.testing import assert_equal, assert_raises
 
 from mojagg.drivers.guvectorize import (
+    AnyGUTensor,
     AxisSpec,
     CoreSpec,
     Dim,
@@ -15,12 +16,33 @@ from mojagg.drivers.guvectorize import (
     GUTensor,
     GUFuncKernel,
     DispatchPolicy as VectorizeDispatchPolicy,
-    build_signature,
+    build_signature_plan,
     guvectorize,
 )
 from mojagg.core.numeric import nan_or_zero
 from mojagg.moving.move_sum import MoveSumKernel
 from mojagg.nanfuncs.nansum import NanSum
+
+
+def run_planned[
+    Operation: GUFuncKernel,
+    *Args: AnyGUTensor,
+](
+    operation: Operation,
+    tensors: Tuple[*Args],
+    input_axes: AxisSpec,
+    output_axes: AxisSpec,
+    policy: VectorizeDispatchPolicy,
+) raises:
+    """Build a plan once, then exercise the execution-only driver."""
+
+    var signature = tensors.copy()
+    var plan = build_signature_plan[Operation, *Args](
+        signature,
+        input_axes,
+        output_axes,
+    )
+    guvectorize[Operation](operation, signature, plan, policy)
 
 
 struct MixedTupleTransform(GUFuncKernel, ImplicitlyCopyable):
@@ -142,17 +164,19 @@ def test_guvectorize_nansum() raises:
             True,
             CoreSpec[],
         ].empty()
-        var planned = build_signature[NanSum[DType.float64]](
-            Tuple(input, template), input_axes, output_axes
-        )
-        var input_view, output_view = planned
-        output_view.bind_address(Int(destination.unsafe_ptr()), 1)
-        var signature = Tuple(input_view, output_view)
-        guvectorize[NanSum[DType.float64]](
-            NanSum[DType.float64](),
+        var signature = Tuple(input, template)
+        var plan = build_signature_plan[NanSum[DType.float64]](
             signature,
             input_axes,
             output_axes,
+        )
+        var output_view = signature[1]
+        output_view.bind_address(Int(destination.unsafe_ptr()), 1)
+        signature[1] = output_view
+        guvectorize[NanSum[DType.float64]](
+            NanSum[DType.float64](),
+            signature,
+            plan,
             VectorizeDispatchPolicy(1, 0, 1),
         )
     except e:
@@ -195,17 +219,19 @@ def test_guvectorize_nansum_power() raises:
             True,
             CoreSpec[],
         ].empty()
-        var planned = build_signature[NanSum[DType.float64, 2]](
-            Tuple(input, template), input_axes, output_axes
-        )
-        var input_view, output_view = planned
-        output_view.bind_address(Int(destination.unsafe_ptr()), 1)
-        var signature = Tuple(input_view, output_view)
-        guvectorize[NanSum[DType.float64, 2]](
-            NanSum[DType.float64, 2](),
+        var signature = Tuple(input, template)
+        var plan = build_signature_plan[NanSum[DType.float64, 2]](
             signature,
             input_axes,
             output_axes,
+        )
+        var output_view = signature[1]
+        output_view.bind_address(Int(destination.unsafe_ptr()), 1)
+        signature[1] = output_view
+        guvectorize[NanSum[DType.float64, 2]](
+            NanSum[DType.float64, 2](),
+            signature,
+            plan,
             VectorizeDispatchPolicy(1, 0, 1),
         )
     except e:
@@ -219,7 +245,7 @@ def test_guvectorize_nansum_power() raises:
     assert_equal(result, expected)
 
 
-def test_guvectorize_move_sum_block_scan() raises:
+def test_guvectorize_move_sum_sequential_simd() raises:
     """Exercise warm-up, delta blocks, NaNs, and both SIMD tail paths."""
 
     comptime width = simd_width_of[DType.float64]()
@@ -277,7 +303,7 @@ def test_guvectorize_move_sum_block_scan() raises:
     axes_values[0] = 0
     var axes = AxisSpec(axes_values.copy(), 1)
     try:
-        guvectorize[MoveSumKernel[DType.float64]](
+        run_planned[MoveSumKernel[DType.float64]](
             MoveSumKernel[DType.float64](window, min_count),
             Tuple(input, output),
             axes,
@@ -386,7 +412,7 @@ def test_heterogeneous_tuple_and_input_scratch() raises:
     axes_values[0] = 1
     var axes = AxisSpec(axes_values.copy(), 1)
     try:
-        guvectorize[MixedTupleTransform](
+        run_planned[MixedTupleTransform](
             MixedTupleTransform(),
             tensors,
             axes,
@@ -475,7 +501,7 @@ def run_noncontiguous_writable_core() raises:
     var output_axes = AxisSpec(output_axis_values.copy(), 1)
 
     try:
-        guvectorize[CopyTupleOperation](
+        run_planned[CopyTupleOperation](
             CopyTupleOperation(),
             tensors,
             input_axes,
@@ -566,7 +592,7 @@ def test_three_dimensional_outer_iterations() raises:
                 ),
             )
 
-            guvectorize[CopyTupleOperation](
+            run_planned[CopyTupleOperation](
                 CopyTupleOperation(),
                 tensors,
                 AxisSpec(input_axes.copy(), 2),
@@ -651,7 +677,7 @@ def run_parallel_threshold_case(core_length: Int, expected_copies: Int) raises:
     copy_counter.unsafe_ptr()[unsafe_offset=0] = 0
 
     try:
-        guvectorize[ParallelProbeOperation](
+        run_planned[ParallelProbeOperation](
             operation,
             tensors,
             input_axes,
@@ -688,7 +714,7 @@ def test_parallel_dispatch_requires_outer_and_inner_thresholds() raises:
 def main() raises:
     test_guvectorize_nansum()
     test_guvectorize_nansum_power()
-    test_guvectorize_move_sum_block_scan()
+    test_guvectorize_move_sum_sequential_simd()
     test_heterogeneous_tuple_and_input_scratch()
     test_rejects_noncontiguous_writable_core()
     test_three_dimensional_outer_iterations()

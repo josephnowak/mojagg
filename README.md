@@ -186,6 +186,66 @@ mojagg is designed and maintained with AI agents as first-class contributors —
 
 Contributions from humans and agents alike are welcome. See `AGENTS.md`.
 
+## Personal experience using Mojo
+
+I really liked the syntax and the general idea behind Mojo, but it is still
+hard to develop with it if you come from a Python background. The language has
+several syntax and metaprogramming limitations, especially around trait
+parametrization, variadic generic arguments, tuple manipulation, and
+compile-time type transformations.
+
+The original design of this project was more generic. The operation signature
+would be built once, the binding would inspect it to identify the outputs, and
+the kernel would be able to unpack the signature directly in `__call__`. In
+an ideal version, the same generic code would build the complete execution
+plan, allocate every output, bind the NumPy addresses, and pass the resulting
+signature to the operation without requiring operation-specific helper
+functions.
+
+In practice, Mojo currently makes some of these patterns difficult or
+impossible. Traits cannot express the parameterized variadic interfaces
+needed for arbitrary operation signatures. A generic function can work with a
+tuple when its element pack is explicitly available as `*Args`, but it cannot
+recover that pack from an opaque associated type such as
+`Operation.Signature`. For example, an `empty_signature[Operation]()` function
+can return `Operation.Signature`, but the result cannot be passed to another
+generic function that expects `Tuple[*Args]`, because the compiler cannot
+infer the element pack from the associated type.
+
+The language also has limited support for generic tuple transformations.
+Filtering the output tensors, constructing a new output-only signature, or
+forwarding an arbitrary tuple through several generic layers is only possible
+when the concrete tuple types have already been exposed to the compiler. This
+forced the project to construct grouped signatures explicitly and to use a
+small number of helpers for the one-output, two-output, and three-output
+cases. Output initialization therefore had to be supplied separately instead
+of being encoded in a fully generic signature schema.
+
+The Python boundary adds another layer of manual work. NumPy arrays cannot be
+converted automatically into the borrowed tensor descriptors used by the
+Mojo driver. The binding must map Mojo dtypes to NumPy dtypes, build the
+planned shape, allocate the arrays, bind their memory addresses, and keep the
+Python owners alive while the native call runs. These operations are possible,
+but the language does not currently provide a simple reflection or ownership
+abstraction that makes this boundary as generic as the original design
+intended.
+
+AI models also tend to make many mistakes when writing Mojo. This may be
+related to the language being new and having fewer examples available for
+training. Even after using the skills provided for Mojo development, I tried
+multiple models, from Luna to K3 to Astra, and all of them required several
+iterations to verify syntax and compiler behavior. This translated into
+additional token usage and development time.
+
+This is not a message saying that Mojo should not be used. It is a message
+that, for many general use cases, the language still lacks important
+functionality, and I would not consider it an ideal language at this point in
+its development. I expect it to improve significantly in the future, and I
+also expect this project to become simpler and more generic as those features
+arrive. The Modular team has already explained that Mojo is still under active
+development and that much of the current effort is focused on AI integration,
+hardware support, and related priorities.
+
 ## License
 
 BSD 3-Clause — same as numbagg. mojagg is and will remain 100% free and open source.

@@ -8,8 +8,8 @@ from mojagg.drivers.guvectorize import (
     CoreSpec,
     Dim,
     GUTensor,
-    GUFuncKernel,
 )
+from mojagg.groupby.group_kernel import GroupKernel
 
 
 @fieldwise_init
@@ -17,7 +17,7 @@ struct GroupNanMinMax[
     value_t: DType,
     label_t: DType,
     is_max: Bool,
-](GUFuncKernel, ImplicitlyCopyable):
+](GroupKernel, ImplicitlyCopyable):
     """Update preinitialized group extrema with valid values."""
 
     comptime Signature = Tuple[

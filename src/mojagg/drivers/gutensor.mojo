@@ -46,6 +46,9 @@ trait AnyGUTensor(Copyable & Deinitable):
     def bind_address(mut self, address: Int, length: Int):
         ...
 
+    def data_address(self) -> Int:
+        ...
+
     def is_bound(self) -> Bool:
         ...
 
@@ -60,7 +63,7 @@ struct GUTensor[
     element_dtype: DType,
     output: Bool,
     core: CoreSpecProtocol,
-](AnyGUTensor, ImplicitlyCopyable):
+](AnyGUTensor, Defaultable, ImplicitlyCopyable):
     """A non-owning descriptor for one gufunc operand.
 
     ``element_dtype``, ``output``, and ``core`` are compile-time properties.
@@ -81,6 +84,16 @@ struct GUTensor[
     var stride: DimArray
     var ndim: Int
     var length: Int
+
+    def __init__(out self):
+        """Create an unbound descriptor for a generic empty signature."""
+
+        self.address = 0
+        self.bound = False
+        self.shape = DimArray(fill=0)
+        self.stride = DimArray(fill=0)
+        self.ndim = 0
+        self.length = 0
 
     def __init__(
         out self,
@@ -110,7 +123,7 @@ struct GUTensor[
     def empty() -> Self:
         """Create an unbound descriptor used as an output template."""
 
-        return Self.unbound(DimArray(fill=0), DimArray(fill=0), 0)
+        return Self()
 
     @staticmethod
     def borrow(
@@ -147,6 +160,12 @@ struct GUTensor[
         self.address = address
         self.length = length
         self.bound = True
+
+    @always_inline
+    def data_address(self) -> Int:
+        """Return the currently bound address without changing the view."""
+
+        return self.address
 
     @always_inline
     def is_bound(self) -> Bool:
@@ -227,7 +246,7 @@ struct GUTensor[
                 mut=False,
                 Scalar[Self.element_dtype],
                 ImmUntrackedOrigin,
-            ](unsafe_from_address=plan.base_address)
+            ](unsafe_from_address=self.address)
             var target = Pointer[
                 mut=True,
                 Scalar[Self.element_dtype],

@@ -72,8 +72,7 @@ def test_multi_output_independence(dtype, threshold, strided):
         a = a[:, :, ::2]
     axes = _resolve_axes((0, 2), a)
     suffix = np.dtype(dtype).name.replace("float", "f").replace("int", "i")
-    result = np.empty(32, dtype=np.bool_)
-    getattr(_native, f"allnan_{suffix}")(a, axes, result, threshold)
+    result = getattr(_native, f"allnan_{suffix}")(a, axes, threshold)
     np.testing.assert_array_equal(result, np.isnan(a).all(axis=(0, 2)))
 
 

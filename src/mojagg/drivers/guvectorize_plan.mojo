@@ -20,7 +20,11 @@ from mojagg.drivers.guvectorize_layout import (
     MAX_RANK,
     OperandPlan,
 )
-from mojagg.drivers.gutensor import AnyGUTensor, GUTensor
+from mojagg.drivers.gutensor import (
+    AnyGUTensor,
+    GUTensor,
+    tensor_element_count,
+)
 from mojagg.drivers.guvectorize_spec import (
     AxisSpec,
     CoreSpecProtocol,
@@ -115,7 +119,7 @@ struct GUVectorizePlan[NUM_TENSORS: Int](Copyable):
             axes = output_axes.values.copy()
         if core_rank < 0 or core_rank > rank:
             raise Error("invalid core rank")
-        if not tensor.bound:
+        if not Args[index].is_output and not tensor.bound:
             raise Error("tensor address is unbound")
 
         var plan = OperandPlan.empty()
@@ -124,8 +128,6 @@ struct GUVectorizePlan[NUM_TENSORS: Int](Copyable):
         plan.outer_rank = rank - core_rank
         plan.core_length = 1
         plan.outer_count = 1
-        plan.base_address = tensor.address
-
         var selected = InlineArray[Bool, MAX_RANK](fill=False)
         for axis in range(rank):
             plan.shape[axis] = tensor.shape[axis]
@@ -311,16 +313,16 @@ def resolve_core_dimensions[
     return result^
 
 
-def _build_signature[
+def _build_signature_plan[
     Operation: GUFuncKernel,
     *Args: AnyGUTensor,
 ](
-    tensors: Tuple[*Args],
+    mut tensors: Tuple[*Args],
     input_axes: AxisSpec,
     output_axes: AxisSpec,
     initial_bindings: CoreBindings,
-) raises -> Tuple[*Args]:
-    """Resolve input core symbols and create metadata-only output views.
+) raises -> GUVectorizePlan[len(Args)]:
+    """Resolve the signature in place and return its executable layout plan.
 
     A rank-one ``CoreSpec[Dim[id]]`` can consume several selected input axes;
     in that reduction form the selected extents are multiplied and bound as
@@ -373,24 +375,38 @@ def _build_signature[
     var common_rank = broadcast.rank
     var common_shape = broadcast.shape.copy()
 
-    var result = tensors.copy()
-
     # Materialize every output descriptor from the broadcast domain and its
     # declared core dimensions.
     comptime for i in range(len(Args)):
         comptime if Args[i].is_output:
-            if result[i].is_bound():
-                raise Error("build_signature requires unbound output templates")
-            var core_rank = Args[i].core_spec.rank
-            if output_axes.count != core_rank:
-                raise Error("output axis count does not match its core spec")
-            var output_rank = common_rank + core_rank
+            var output_was_bound = tensors[i].is_bound()
+            var output_address = tensors[i].data_address()
+            var logical_core_rank = Args[i].core_spec.rank
+            var physical_core_rank = logical_core_rank
+            var flattened_output = False
+            if output_axes.count != logical_core_rank:
+                # A rank-one transform can consume several physical axes as
+                # one flattened logical span.  Preserve those physical core
+                # extents on the output while retaining the rank-one kernel
+                # contract.  Fill uses this form.
+                if (
+                    logical_core_rank == 1
+                    and input_axes.count > 1
+                    and output_axes.count == input_axes.count
+                ):
+                    physical_core_rank = output_axes.count
+                    flattened_output = True
+                else:
+                    raise Error(
+                        "output axis count does not match its core spec"
+                    )
+            var output_rank = common_rank + physical_core_rank
             if output_rank < 0 or output_rank > MAX_RANK:
                 raise Error("output rank exceeds guvectorize capacity")
 
             var output_shape = DimArray(fill=1)
             var selected = InlineArray[Bool, MAX_RANK](fill=False)
-            for core_axis in range(core_rank):
+            for core_axis in range(physical_core_rank):
                 var axis = output_axes[core_axis]
                 if axis < 0 or axis >= output_rank or selected[axis]:
                     raise Error(
@@ -398,9 +414,16 @@ def _build_signature[
                     )
                 selected[axis] = True
 
-            var resolved_core_shape = resolve_core_dimensions[
-                Args[i].core_spec
-            ](bindings)
+            var resolved_core_shape = DimArray(fill=1)
+            if flattened_output:
+                for core_axis in range(physical_core_rank):
+                    resolved_core_shape[core_axis] = plans[0].core_shape[
+                        core_axis
+                    ]
+            else:
+                resolved_core_shape = resolve_core_dimensions[
+                    Args[i].core_spec
+                ](bindings)
 
             var core_index = 0
             var outer_index = 0
@@ -412,23 +435,35 @@ def _build_signature[
                     output_shape[axis] = common_shape[outer_index]
                     outer_index += 1
 
-            result[i].set_unbound_layout(output_shape, output_rank)
+            tensors[i].set_unbound_layout(output_shape, output_rank)
+            if output_was_bound:
+                # Low-level callers may supply an already allocated output.
+                # The Python materialization path leaves this false and binds
+                # the address only after the plan is complete.
+                tensors[i].bind_address(
+                    output_address,
+                    tensor_element_count(output_shape, output_rank),
+                )
 
-    return result^
+    return GUVectorizePlan[len(Args)].build[*Args](
+        tensors,
+        input_axes,
+        output_axes,
+    )
 
 
-def build_signature[
+def build_signature_plan[
     Operation: GUFuncKernel,
     *Args: AnyGUTensor,
 ](
-    tensors: Tuple[*Args],
+    mut tensors: Tuple[*Args],
     input_axes: AxisSpec,
     output_axes: AxisSpec,
-) raises -> Tuple[*Args]:
-    """Resolve a kernel signature from input dimensions."""
+) raises -> GUVectorizePlan[len(Args)]:
+    """Resolve a kernel signature in place and return its layout plan."""
 
     var bindings = CoreBindings.empty()
-    return _build_signature[Operation, *Args](
+    return _build_signature_plan[Operation, *Args](
         tensors,
         input_axes,
         output_axes,
@@ -436,22 +471,22 @@ def build_signature[
     )
 
 
-def build_signature_with_bindings[
+def build_signature_plan_with_bindings[
     Operation: GUFuncKernel,
     *Args: AnyGUTensor,
 ](
-    tensors: Tuple[*Args],
+    mut tensors: Tuple[*Args],
     input_axes: AxisSpec,
     output_axes: AxisSpec,
     initial_bindings: CoreBindings,
-) raises -> Tuple[*Args]:
+) raises -> GUVectorizePlan[len(Args)]:
     """Resolve a signature while seeding symbols from an external dimension.
 
     Quantile uses this form because the output core length comes from the
     separate quantile array rather than from an input tensor core.
     """
 
-    return _build_signature[Operation, *Args](
+    return _build_signature_plan[Operation, *Args](
         tensors,
         input_axes,
         output_axes,

@@ -13,8 +13,8 @@ from mojagg.drivers.guvectorize import (
     CoreSpec,
     Dim,
     GUTensor,
-    GUFuncKernel,
 )
+from mojagg.groupby.group_kernel import GroupKernel
 
 
 @fieldwise_init
@@ -22,7 +22,7 @@ struct GroupNanSum[
     value_t: DType,
     label_t: DType,
     power: Int,
-](GUFuncKernel, ImplicitlyCopyable):
+](GroupKernel, ImplicitlyCopyable):
     """Accumulate a compile-time power of valid values into dense groups."""
 
     comptime Signature = Tuple[

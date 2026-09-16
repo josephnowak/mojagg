@@ -5,11 +5,11 @@ from std.math import isnan, sqrt
 from std.sys.info import simd_width_of
 
 from mojagg.core.numeric import nan_or_zero
+from mojagg.groupby.group_kernel import GroupKernel
 from mojagg.drivers.guvectorize import (
     CoreSpec,
     Dim,
     GUTensor,
-    GUFuncKernel,
 )
 
 
@@ -18,7 +18,7 @@ struct GroupNanVarStd[
     value_t: DType,
     label_t: DType,
     is_std: Bool,
-](GUFuncKernel, ImplicitlyCopyable):
+](GroupKernel, ImplicitlyCopyable):
     """Accumulate sum, sum of squares, and count for each group."""
 
     var ddof: Int

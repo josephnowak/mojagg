@@ -5,11 +5,11 @@ from std.math import isnan
 from std.sys.info import simd_width_of
 
 from mojagg.core.numeric import nan_or_zero
+from mojagg.groupby.group_kernel import GroupKernel
 from mojagg.drivers.guvectorize import (
     CoreSpec,
     Dim,
     GUTensor,
-    GUFuncKernel,
 )
 
 
@@ -17,7 +17,7 @@ from mojagg.drivers.guvectorize import (
 struct GroupNanMean[
     value_t: DType,
     label_t: DType,
-](GUFuncKernel, ImplicitlyCopyable):
+](GroupKernel, ImplicitlyCopyable):
     """Accumulate sums and counts, then finalize each group mean."""
 
     comptime Signature = Tuple[

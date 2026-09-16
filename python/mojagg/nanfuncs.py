@@ -277,16 +277,9 @@ def nanquantile(a, quantiles, axis=None, **kwargs):
         arr_val = arr_val.reshape(1)
 
     axes = _resolve_axes(axis, arr_val)
-    axes_set = frozenset(axes)
-    outer_shape = tuple(arr_val.shape[d] for d in range(arr_val.ndim) if d not in axes_set)
-
-    num_q = len(q_arr)
-    out_shape = outer_shape + (num_q,)
-    out = np.empty(out_shape, dtype=arr_val.dtype)
-
     cfg = get_config()
     kernel = _NANQUANTILE_KERNELS[arr_val.dtype]
-    kernel(arr_val, axes, q_arr, out, cfg)
+    out = kernel(arr_val, axes, q_arr, cfg)
 
     result = np.moveaxis(out, -1, 0)
     if squeeze:

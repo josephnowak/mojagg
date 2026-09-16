@@ -30,7 +30,6 @@ struct OperandPlan(Copyable):
     var outer_rank: Int
     var core_length: Int
     var outer_count: Int
-    var base_address: Int
     var shape: DimArray
     var stride: DimArray
     var core_shape: DimArray
@@ -44,7 +43,6 @@ struct OperandPlan(Copyable):
         """Construct the zero metadata value used to initialize plans."""
 
         return Self(
-            0,
             0,
             0,
             0,

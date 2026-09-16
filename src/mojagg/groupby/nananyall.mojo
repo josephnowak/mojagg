@@ -8,8 +8,8 @@ from mojagg.drivers.guvectorize import (
     CoreSpec,
     Dim,
     GUTensor,
-    GUFuncKernel,
 )
+from mojagg.groupby.group_kernel import GroupKernel
 
 
 @fieldwise_init
@@ -17,7 +17,7 @@ struct GroupNanAnyAll[
     value_t: DType,
     label_t: DType,
     is_all: Bool,
-](GUFuncKernel, ImplicitlyCopyable):
+](GroupKernel, ImplicitlyCopyable):
     """Update group truth values while ignoring NaNs."""
 
     comptime Signature = Tuple[

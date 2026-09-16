@@ -20,7 +20,7 @@ from mojagg.core.dispatch import DispatchPolicy
 from mojagg.drivers.guvectorize_layout import OperandPlan
 from mojagg.drivers.gutensor import AnyGUTensor
 from mojagg.drivers.guvectorize_plan import GUVectorizePlan
-from mojagg.drivers.guvectorize_spec import AxisSpec, GUFuncKernel
+from mojagg.drivers.guvectorize_spec import GUFuncKernel
 
 
 @always_inline
@@ -87,7 +87,7 @@ def execute_range[
         comptime for i in range(len(Args)):
             var offset = outer_offset(plan.operands[i], flat_outer)
             var address = (
-                plan.operands[i].base_address
+                tensors[i].data_address()
                 + offset * size_of[Scalar[Args[i].dtype]]()
             )
             if operand_requires_scratch[i, *Args](plan):
@@ -96,9 +96,7 @@ def execute_range[
                     + worker_id * scratch_stride
                     + scratch_offsets[i]
                 )
-                local_tensors[i].copy_core(
-                    plan.operands[i], offset, destination
-                )
+                tensors[i].copy_core(plan.operands[i], offset, destination)
                 address = destination
             local_tensors[i].bind_address(address, plan.operands[i].core_length)
 
@@ -170,26 +168,20 @@ def guvectorize[
 ](
     operation: Operation,
     tensors: Tuple[*Args],
-    input_axes: AxisSpec,
-    output_axes: AxisSpec,
+    plan: GUVectorizePlan[len(Args)],
     policy: DispatchPolicy,
 ) raises:
-    """Plan and execute one combined-signature operation over outer slices.
+    """Execute an already planned combined-signature operation.
 
-    Planning and scratch sizing happen once. The operation then receives a
-    tuple whose descriptors all refer to the same logical outer position and
-    whose writable cores are direct caller-owned spans.
+    The signature carries the current input and output addresses. The plan
+    carries only shape and stride metadata, so output materialization can bind
+    caller-owned NumPy arrays without patching a second plan object.
     """
 
     comptime assert (
         Operation.Signature == Tuple[*Args]
     ), "tensor tuple does not match the kernel signature"
 
-    var plan = GUVectorizePlan[len(Args)].build[*Args](
-        tensors,
-        input_axes,
-        output_axes,
-    )
     if plan.outer_count == 0:
         return
 

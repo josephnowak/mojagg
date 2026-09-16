@@ -8,15 +8,15 @@ from mojagg.drivers.guvectorize import (
     CoreSpec,
     Dim,
     GUTensor,
-    GUFuncKernel,
 )
+from mojagg.groupby.group_kernel import GroupKernel
 
 
 @fieldwise_init
 struct GroupNanCount[
     value_t: DType,
     label_t: DType,
-](GUFuncKernel, ImplicitlyCopyable):
+](GroupKernel, ImplicitlyCopyable):
     """Count valid values into dense groups."""
 
     comptime Signature = Tuple[

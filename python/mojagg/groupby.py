@@ -1,8 +1,8 @@
 """Grouped NaN-aware reductions.
 
-The facade owns public validation, axis normalization, label sizing, output
-initialization, and zero-copy label broadcasting. Native kernels receive one
-normalized call with dense, zero-based group labels.
+The facade owns public validation, axis normalization, label sizing, and
+zero-copy label broadcasting. The native binding derives and initializes the
+complete output signature before executing the kernel.
 """
 
 from __future__ import annotations
@@ -138,9 +138,7 @@ def _prepare_group_call(values, labels, axis, num_labels, op_name):
         for position, value_axis in enumerate(axes):
             full_shape[value_axis] = labels_arr.shape[position]
         labels_arr = np.broadcast_to(labels_arr.reshape(tuple(full_shape)), values_arr.shape)
-    reduced = frozenset(axes)
-    outer_shape = tuple(values_arr.shape[d] for d in range(values_arr.ndim) if d not in reduced)
-    return values_arr, labels_arr, axes, outer_shape, nlabels
+    return values_arr, labels_arr, axes, nlabels
 
 
 def _resolve_num_labels(labels: np.ndarray, num_labels) -> int:
@@ -163,62 +161,17 @@ def _resolve_num_labels(labels: np.ndarray, num_labels) -> int:
 
 
 def _group_reduce(op_name, values, labels, axis=None, num_labels=None, *, ddof=1):
-    values_arr, labels_arr, axes, outer_shape, nlabels = _prepare_group_call(
+    values_arr, labels_arr, axes, nlabels = _prepare_group_call(
         values, labels, axis, num_labels, op_name
     )
-    internal_shape = outer_shape + (nlabels,)
-    result = np.zeros(internal_shape, dtype=values_arr.dtype)
-    auxiliary: list[np.ndarray] = []
-
-    if op_name == "group_nanprod" or op_name == "group_nanall":
-        result.fill(1)
-    elif op_name in {
-        "group_nanmin",
-        "group_nanmax",
-    }:
-        if np.issubdtype(result.dtype, np.floating):
-            result.fill(np.nan)
-        else:
-            # Numbagg leaves unseen integer groups at zero.  The native
-            # kernel uses the seen workspace, so this value is only visible
-            # when a group receives no valid value.
-            result.fill(0)
-    elif op_name in {
-        "group_nanargmin",
-        "group_nanargmax",
-        "group_nanfirst",
-        "group_nanlast",
-    } and np.issubdtype(result.dtype, np.floating):
-        result.fill(np.nan)
-
-    if op_name == "group_nanmean" or op_name in {"group_nanmin", "group_nanmax"}:
-        auxiliary.append(np.zeros(internal_shape, dtype=np.int64))
-    elif op_name in {"group_nanargmin", "group_nanargmax"}:
-        best_values = np.zeros(internal_shape, dtype=values_arr.dtype)
-        if np.issubdtype(best_values.dtype, np.floating):
-            best_values.fill(np.nan)
-        auxiliary.extend([best_values, np.zeros(internal_shape, dtype=np.int64)])
-    elif op_name == "group_nanfirst" or op_name == "group_nanlast":
-        auxiliary.append(np.zeros(internal_shape, dtype=np.int64))
-    elif op_name in {"group_nanvar", "group_nanstd"}:
-        auxiliary.extend(
-            [
-                np.zeros(internal_shape, dtype=values_arr.dtype),
-                np.zeros(internal_shape, dtype=np.int64),
-            ]
-        )
-
-    if result.size == 0:
-        return result
     cfg = get_config()
-    _GROUP_KERNELS[op_name][values_arr.dtype][labels_arr.dtype](
+    return _GROUP_KERNELS[op_name][values_arr.dtype][labels_arr.dtype](
         values_arr,
         labels_arr,
         axes,
-        result,
-        (tuple(auxiliary), cfg, int(ddof)),
+        nlabels,
+        (cfg, int(ddof)),
     )
-    return result
 
 
 def group_nansum(values, labels, *, axis=None, num_labels=None):

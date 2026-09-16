@@ -8,8 +8,8 @@ from mojagg.drivers.guvectorize import (
     CoreSpec,
     Dim,
     GUTensor,
-    GUFuncKernel,
 )
+from mojagg.groupby.group_kernel import GroupKernel
 
 
 @fieldwise_init
@@ -17,7 +17,7 @@ struct GroupNanArgMinMax[
     value_t: DType,
     label_t: DType,
     is_max: Bool,
-](GUFuncKernel, ImplicitlyCopyable):
+](GroupKernel, ImplicitlyCopyable):
     """Track the best value and its local flattened index per group."""
 
     comptime Signature = Tuple[

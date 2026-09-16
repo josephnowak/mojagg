@@ -64,7 +64,7 @@ struct CoreSpec[*Dims: CoreDim](CoreSpecProtocol):
 
     ``CoreSpec[]`` is a scalar core. Equal ``Dim`` IDs express equal runtime
     extents, while ``FixedDim`` expresses an exact extent. The runtime shape is
-    resolved later by ``build_signature``.
+    resolved later by ``build_signature_plan``.
     """
 
     comptime rank = len(Self.Dims)
@@ -124,10 +124,16 @@ trait GUFuncKernel(Copyable & Deinitable):
     its ``Signature`` associated constant.
     """
 
-    comptime Signature: AnyType
+    comptime Signature: Defaultable
 
     # A parameterized variadic trait would express direct named arguments, but
     # Mojo 1.0 does not permit parameters on trait declarations.  The concrete
     # signature remains fully static and the operation receives one native tuple.
     def __call__(mut self, tensors: Self.Signature):
         ...
+
+
+def empty_signature[Operation: GUFuncKernel]() -> Operation.Signature:
+    """Create the unbound descriptor tuple declared by an operation."""
+
+    return Operation.Signature()

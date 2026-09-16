@@ -7,7 +7,7 @@ public op). Python's only jobs here, per the zero-copy contract (SKILL.md
 - dtype promotion following numbagg's rules (visible, never inside kernels)
 - big-endian → native byteswap (the ONLY allowed copy, documented)
 - axis normalization to a validated tuple (stride-sorted for value reductions)
-- output allocation + error translation
+- native output planning, result-dtype validation, and error translation
 
 Adding a new nanfunc is one line:
     nanmean = reduce_op("nanmean", _NANMEAN_KERNELS, _promote_nanmean_like)
@@ -20,8 +20,20 @@ from operator import index
 
 import numpy as np
 
-# Native binding signature: (ndarray, axes: tuple, out: ndarray, threshold).
+# Native binding signature: (ndarray, axes: tuple, threshold) -> ndarray.
 NativeKernel = Callable[..., object]
+
+
+def _resolve_output_dtype(
+    out_dtype: np.dtype | Callable[[np.dtype], np.dtype] | None,
+    input_dtype: np.dtype,
+) -> np.dtype:
+    """Resolve the dtype promised by a reduction's native signature."""
+    if out_dtype is None:
+        return np.dtype(input_dtype)
+    if isinstance(out_dtype, (np.dtype, type)):
+        return np.dtype(out_dtype)
+    return np.dtype(out_dtype(input_dtype))
 
 
 def _promote_nansum_like(a: np.ndarray) -> np.ndarray:
@@ -126,26 +138,26 @@ def _reduce_axis(
     axes = _resolve_axes(axis, a, sort_axes=sort_axes)
     axes_set = frozenset(axes)
     out_shape = tuple(a.shape[d] for d in range(a.ndim) if d not in axes_set)
-    if out_dtype is None:
-        res_dtype = a.dtype
-    elif callable(out_dtype) and not isinstance(out_dtype, (np.dtype, type)):
-        res_dtype = np.dtype(out_dtype(a.dtype))
-    else:
-        res_dtype = np.dtype(out_dtype)
-    out = np.empty(out_shape, dtype=res_dtype)
-    if empty_error is not None and out.size > 0 and any(a.shape[d] == 0 for d in axes):
+    expected_dtype = _resolve_output_dtype(out_dtype, a.dtype)
+    out_size = 1
+    for extent in out_shape:
+        out_size *= extent
+    if empty_error is not None and out_size > 0 and any(a.shape[d] == 0 for d in axes):
         raise ValueError(empty_error)
     try:
         cfg = get_config()
         if native_parameter is None:
-            entry(a, axes, out, cfg)
+            result = entry(a, axes, cfg)
         else:
-            entry(a, axes, out, native_parameter, cfg)
+            result = entry(a, axes, native_parameter, cfg)
     except Exception as e:
         raise _translate_errors(op, e) from None
-    if invalid_output_error is not None and out.size > 0 and np.any(out < 0):
+    result_dtype = np.dtype(result.dtype)
+    if result_dtype != expected_dtype:
+        raise TypeError(f"{op} returned dtype {result_dtype}; expected {expected_dtype}")
+    if invalid_output_error is not None and out_size > 0 and np.any(result < 0):
         raise ValueError(invalid_output_error)
-    return out
+    return result
 
 
 def reduce_op(
