@@ -1,5 +1,19 @@
 # mojagg
 
+## Development workflow
+
+Development on Windows always runs through Ubuntu WSL. Use the single wrapper
+for setup, source discovery, compilation, tests, linting, and benchmarks:
+
+```powershell
+powershell.exe -NoProfile -ExecutionPolicy Bypass -File scripts/mojagg.ps1 install
+powershell.exe -NoProfile -ExecutionPolicy Bypass -File scripts/mojagg.ps1 doctor
+powershell.exe -NoProfile -ExecutionPolicy Bypass -File scripts/mojagg.ps1 test
+```
+
+The wrapper scopes normal source searches to `python/`, `src/`, and `tests/`.
+See `.agents/skills/mojagg-workflow/SKILL.md` for the AI workflow.
+
 **NaN-aware aggregations, grouped reductions, and rolling windows — numbagg's API, Mojo's speed.**
 
 ```python
@@ -35,7 +49,7 @@ differential wrappers. Supported operations must match numbagg's values,
 shapes, dtypes and exception types; missing numbagg is an error, not a skip.
 `nanprod` has no standalone numbagg equivalent and is explicitly NumPy-only.
 
-`pixi run bench-reference --save comparison.json` compares public APIs using
+`powershell.exe -NoProfile -ExecutionPolicy Bypass -File scripts/mojagg.ps1 bench-reference --save comparison.json` compares public APIs using
 the same upstream inputs, with correctness checks and JIT warmup before timing.
 Add `--full` for million-element matrices, or `--ops nanmean nansum` to narrow
 the run. Reports include fixture commit, runtime numbagg/NumPy versions, thread
@@ -58,58 +72,33 @@ development measurements, not native-Linux dispatch calibration.
 | `group_nansum` (1e7 rows, 1e4 groups) | 1.0× (groupies) | 15× | **TBD** | TBD |
 | `move_mean` (1e7 f64, w=100) | — | 20× | **TBD** | TBD |
 
-Run them: `python benchmarks/full_matrix.py` · Continuous per-PR performance tracking via [CodSpeed](https://codspeed.io).
+Run them: `powershell.exe -NoProfile -ExecutionPolicy Bypass -File scripts/mojagg.ps1 bench-full` · Continuous per-PR performance tracking via [CodSpeed](https://codspeed.io).
 
-### Reduction development
+### GUFunc driver
 
-`allnan`, `nansum` and `nanmean` implement `NaNReduction1D` in
-`src/mojagg/core/reduce1d.mojo`. Shared scanners handle contiguous SIMD and
-scalar strides; the axis driver merges partial states and finalizes once per
-output slice. Native vector width and arithmetic accumulator-chain count are
-separate. Sum retains its eight-chain EVL accumulator and scalar strided sum.
+Every operation declares one fixed-arity native tuple of typed `GUTensor`
+descriptors. Dtypes, read/write capabilities, and core dimensions are
+compile-time specializations; there is no boxed runtime dtype dispatch. The
+binding resolves symbolic core sizes, the driver broadcasts only outer
+dimensions, and `GUFuncKernel.__call__` receives one prepared core per outer
+position. Non-contiguous read cores use worker-local scratch, while writable
+cores are validated for direct writes. `DispatchPolicy` parallelizes the outer
+slice domain only after both the outer-group and input-core thresholds pass.
 
-`allnan` checks `isnan(values).reduce_and()` after each native-width block.
-Its terminal state also stops the multi-axis odometer, never other output
-slices. Compile-time capabilities erase those checks for sum and bypass input
-traversal entirely for integer `allnan`. Other reductions pass `HookReduction`
-explicitly to the same `reduce_axis[Op: Reduction1D]` entry point. There is no
-legacy four-hook overload. `HookReduction` describes a result-valued operation;
-the axis driver still owns N-D planning, slice traversal and parallelism.
+See the full [guvectorize driver reference](docs/guvectorize.md) for the
+Numba gufunc model, `GUTensor` ownership, core-axis flattening, output layout,
+broadcasting examples, native binding flow, scratch behavior, and contribution
+rules.
 
-`nanmean` carries a float64 sum and int64 valid count through both scanners
-and multi-axis merging; it divides only at finalization. Empty/all-NaN slices
-return NaN. Float32 input remains zero-copy with a float32 result, but uses
-float64 arithmetic internally to match numbagg (including finite values whose
-float32 sum would overflow). The facade follows the reference's safe-casting
-order: bool/small integers/float16 -> float32; 32/64-bit integers -> float64.
-Unsupported nonnumeric dtypes are rejected instead of coerced.
-
-Mean's width sweep is reproducible with
-`pixi run mojo run -O3 -I src benchmarks/mean_widths.mojo`. The seven-trial,
-alternating 1/2/4/8-chain comparison selected one chain for float32 and four
-for float64. On the development WSL host, at 100,003 elements their median
-kernel times were 41.5 us and 36.5 us respectively; float64's one-chain
-baseline took 50.1 us. Four float64 chains trade roughly 8 ns on 17-element
-runs for faster long scans. Recalibrate on native hardware before claiming
-portable speedups. Python benchmark rows compare both dtypes against NumPy
-and numbagg.
-
-The local quick public-API comparison was mixed: full 1M-element means took
-about 0.56/0.52 ms (f32/f64) versus numbagg's 6.27/7.88 ms, but float64 tiny
-rows and column reductions remained slower than numbagg (2.44 vs 0.99 ms and
-2.32 vs 1.32 ms respectively). These WSL measurements are not a claim that
-every shape is faster.
-
-Run `pixi run test-mojo` to check actual traversal counts, including parallel
-output independence, and `pixi run test` for Python parity.
+Run `powershell.exe -NoProfile -ExecutionPolicy Bypass -File scripts/mojagg.ps1 test-mojo` for the native tuple and scratch-path smoke tests, and
+`powershell.exe -NoProfile -ExecutionPolicy Bypass -File scripts/mojagg.ps1 test-python` for Python parity against numbagg.
 `benchmarks/reduction_contract.py` times the native boundary with allocations
 and reference calculations excluded:
 
-```bash
-pixi run build-ext
-PYTHONPATH=python pixi run python benchmarks/reduction_contract.py --save before.json
+```powershell
+powershell.exe -NoProfile -ExecutionPolicy Bypass -File scripts/mojagg.ps1 reduction-contract --save before.json
 # Preserve a copy of the built extension before editing, then rebuild.
-PYTHONPATH=python pixi run python benchmarks/reduction_contract.py --baseline-library before.so --save paired.json
+powershell.exe -NoProfile -ExecutionPolicy Bypass -File scripts/mojagg.ps1 reduction-contract --baseline-library before.so --save paired.json
 ```
 
 The paired mode alternates old/new libraries on identical inputs, checks equal
@@ -164,18 +153,21 @@ Native reduction kernels instantiate `float64`/`float32`/`int64`/`int32`;
 the facade visibly promotes numbagg-compatible small and integer inputs where
 required. Reduction inputs remain zero-copy, except for documented promotion
 and big-endian normalization.
+Grouped operations expect dense, non-negative factorization labels.
 
 ## Configuration
 
 ```python
-with mojagg.config(parallel_threshold=50_000, threads=8):
+with mojagg.config(parallel_threshold=50_000, parallel_min_groups=64, threads=8):
     mojagg.group_nansum(values, labels)
 
 mojagg.set_config(backend="cpu")  # global
 # or env: MOJAGG_PARALLEL_THRESHOLD=50000 MOJAGG_THREADS=8
 ```
 
-Context manager > global > env var > tuned defaults (benchmark-derived).
+Parallel dispatch requires both thresholds: enough outer slices and enough
+elements in each input core. Context manager > global > env var > tuned
+defaults (benchmark-derived).
 
 ## Philosophy
 
@@ -193,6 +185,66 @@ mojagg is designed and maintained with AI agents as first-class contributors —
 - **Agent-friendly API**: predictable naming, explicit errors, structured config — easy for codegen tools to call correctly.
 
 Contributions from humans and agents alike are welcome. See `AGENTS.md`.
+
+## Personal experience using Mojo
+
+I really liked the syntax and the general idea behind Mojo, but it is still
+hard to develop with it if you come from a Python background. The language has
+several syntax and metaprogramming limitations, especially around trait
+parametrization, variadic generic arguments, tuple manipulation, and
+compile-time type transformations.
+
+The original design of this project was more generic. The operation signature
+would be built once, the binding would inspect it to identify the outputs, and
+the kernel would be able to unpack the signature directly in `__call__`. In
+an ideal version, the same generic code would build the complete execution
+plan, allocate every output, bind the NumPy addresses, and pass the resulting
+signature to the operation without requiring operation-specific helper
+functions.
+
+In practice, Mojo currently makes some of these patterns difficult or
+impossible. Traits cannot express the parameterized variadic interfaces
+needed for arbitrary operation signatures. A generic function can work with a
+tuple when its element pack is explicitly available as `*Args`, but it cannot
+recover that pack from an opaque associated type such as
+`Operation.Signature`. For example, an `empty_signature[Operation]()` function
+can return `Operation.Signature`, but the result cannot be passed to another
+generic function that expects `Tuple[*Args]`, because the compiler cannot
+infer the element pack from the associated type.
+
+The language also has limited support for generic tuple transformations.
+Filtering the output tensors, constructing a new output-only signature, or
+forwarding an arbitrary tuple through several generic layers is only possible
+when the concrete tuple types have already been exposed to the compiler. This
+forced the project to construct grouped signatures explicitly and to use a
+small number of helpers for the one-output, two-output, and three-output
+cases. Output initialization therefore had to be supplied separately instead
+of being encoded in a fully generic signature schema.
+
+The Python boundary adds another layer of manual work. NumPy arrays cannot be
+converted automatically into the borrowed tensor descriptors used by the
+Mojo driver. The binding must map Mojo dtypes to NumPy dtypes, build the
+planned shape, allocate the arrays, bind their memory addresses, and keep the
+Python owners alive while the native call runs. These operations are possible,
+but the language does not currently provide a simple reflection or ownership
+abstraction that makes this boundary as generic as the original design
+intended.
+
+AI models also tend to make many mistakes when writing Mojo. This may be
+related to the language being new and having fewer examples available for
+training. Even after using the skills provided for Mojo development, I tried
+multiple models, from Luna to K3 to Astra, and all of them required several
+iterations to verify syntax and compiler behavior. This translated into
+additional token usage and development time.
+
+This is not a message saying that Mojo should not be used. It is a message
+that, for many general use cases, the language still lacks important
+functionality, and I would not consider it an ideal language at this point in
+its development. I expect it to improve significantly in the future, and I
+also expect this project to become simpler and more generic as those features
+arrive. The Modular team has already explained that Mojo is still under active
+development and that much of the current effort is focused on AI integration,
+hardware support, and related priorities.
 
 ## License
 

@@ -5,6 +5,23 @@ loops. All helpers are comptime-specialized and inline to nothing.
 """
 
 
+def _dtype_name[dtype: DType]() -> String:
+    """Return the NumPy spelling for a dtype supported by mojagg."""
+
+    comptime if dtype == DType.float64:
+        return "float64"
+    elif dtype == DType.float32:
+        return "float32"
+    elif dtype == DType.int64:
+        return "int64"
+    elif dtype == DType.int32:
+        return "int32"
+    elif dtype == DType.bool:
+        return "bool"
+    else:
+        return "unsupported"
+
+
 @always_inline
 def nan_or_zero[dtype: DType]() -> Scalar[dtype]:
     """Quiet NaN for float dtypes; 0 for ints (callers guarantee the int path

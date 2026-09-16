@@ -1,6 +1,6 @@
 #!/usr/bin/env bash
 set -u
-cd /mnt/c/Users/usuario/PycharmProjects/PythonProject/mojo-group-by
+cd "$(dirname "$0")/../.."
 export PATH="$PWD/.pixi/envs/default/bin:$PATH"
 export PYTHONPATH=python
 python benchmarks/gufunc_driver/probe_env.py

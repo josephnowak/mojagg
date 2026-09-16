@@ -1,2 +1,5 @@
+# Normalize tracked text files to LF in the repository and working tree.
+* text=auto eol=lf
+
 # SCM syntax highlighting & preventing 3-way merges
 pixi.lock merge=binary linguist-language=YAML linguist-generated=true -diff

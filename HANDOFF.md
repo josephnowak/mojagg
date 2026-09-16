@@ -29,7 +29,7 @@ at `.analysis/NuMojo` for inspiration (see §6 for what to take/reject).
   `step`/`step_simd`/`result`. Loops (contiguous SIMD, strided scalar,
   odometer) are shared in `core/` + `drivers/`. (See §7.)
 - **numba.guvectorize equivalent = a Mojo driver per family**
-  (`drivers/reduce_axis.mojo` etc.) — one FFI call per public op, N-D
+  (`drivers/gufunc.mojo` etc.) — one FFI call per public op, N-D
   iteration in compiled code, parallelized. NEVER a Python per-row loop
   (measured: 16–1270× slower than numbagg).
 - **Config**: dask-style layered — thread-local context manager >
@@ -59,9 +59,9 @@ at `.analysis/NuMojo` for inspiration (see §6 for what to take/reject).
 - Working invocation pattern (from Windows PowerShell) — put commands in a
   bash script file with **LF endings** (CRLF breaks bash; write via
   `[IO.File]::WriteAllText` with `` `n `` joins) and run:
-  `wsl -d Ubuntu -- bash /mnt/c/Users/usuario/PycharmProjects/PythonProject/mojo-group-by/<script>.sh`
+  `wsl -d Ubuntu -- bash /mnt/c/Users/usuario/PycharmProjects/PythonProject/mojagg/<script>.sh`
 - Script must set:
-  `cd /mnt/c/Users/usuario/PycharmProjects/PythonProject/mojo-group-by`
+  `cd /mnt/c/Users/usuario/PycharmProjects/PythonProject/mojagg`
   `export PATH="$PWD/.pixi/envs/default/bin:$PATH"`
   `export PYTHONPATH=python`   (for tests importing mojagg)
 - Build: `python scripts/build_ext.py` (compiles
@@ -120,12 +120,12 @@ Committed: `29aa248 scaffold: mojagg project foundation` (docs, CI,
 config.py, pixi.toml). Everything else is uncommitted work-in-progress.
 
 **NEW ARCHITECTURE VERIFIED (2026-09-03, allnan vertical slice, 14/14 green):**
-- `src/mojagg/core/ndview.mojo` — `NDView[dtype]` Copyable struct:
+- `src/mojagg/core/tensor_view.mojo` — typed `LayoutTensor`/`RuntimeLayout` views:
   addr(Int) + ndim + `DimArray` (= `Array[Int, MAX_NDIM]`, the module-level
   `comptime MAX_NDIM = 8` shared by view/driver/bindings) sizes/strides
   (ELEMENT units); `from_numpy` validates dtype once; `ptr()` reconstitutes
   the typed pointer.
-- `src/mojagg/drivers/reduce_axis.mojo` — the gufunc driver, SCENARIO-SPLIT
+- `src/mojagg/drivers/gufunc.mojo` — the gufunc driver, SCENARIO-SPLIT
   (2026-09-03 refactor, re-verified 14/14 green): `ReducePlan.build`
   partitions dims into outer/reduced ONCE and classifies one of three
   scenarios — MERGED (reduced strides chain to 1 → single contig SIMD call),
@@ -334,10 +334,10 @@ NDView + our kernels? Answer: **NO on both.** (Clone: `.analysis/max` @
 
 ## 7. AGREED next architecture (user-approved direction, not yet written)
 
-- `src/mojagg/core/ndview.mojo` — `NDView[dtype, MAX_NDIM=8]`: ptr +
+- `src/mojagg/core/tensor_view.mojo` — typed `LayoutTensor`/`RuntimeLayout` metadata:
   `InlineArray` sizes/strides (ELEMENT units), built ONCE per call from
   PythonObject attrs. Stack-only metadata.
-- `src/mojagg/drivers/reduce_axis.mojo` — odometer over outer dims; per
+- `src/mojagg/drivers/gufunc.mojo` — odometer over outer dims; per
   slice `stride==1 ? SIMD kernel : scalar strided`; serial incremental vs
   parallel (divmod fast-forward) chosen by `cfg.parallel_threshold`;
   `axis=None` collapses to one flat run; tuple axes merge when strides
@@ -459,7 +459,7 @@ int32 arrays, i64 otherwise for ints.
 
 ## 9. Immediate next steps (in order)
 
-1. Implement `core/ndview.mojo` + `drivers/reduce_axis.mojo` + hook loops;
+1. Implement `core/tensor_view.mojo` + `drivers/gufunc.mojo` + hook loops;
    convert NanSum/AllNan/AnyNan to hook structs; generic binding; rewire
    facade. Acceptance: parity tests green + driver benchmark through the
    real facade reproduces the §6 numbers.

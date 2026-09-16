@@ -132,7 +132,8 @@ def test_mean_unsupported_dtype(a):
 def test_mean_native_dtype_validation(dtype, suffix):
     a = np.array([1, 2], dtype=dtype)
     entry = getattr(_native, f"nanmean_{suffix}")
-    with pytest.raises(Exception, match="output must be"):
-        entry(a, _resolve_axes(None, a), np.empty((), dtype=np.int64), 2**60)
+    result = entry(a, _resolve_axes(None, a), 2**60)
+    assert result.shape == ()
+    assert result.dtype == dtype
     with pytest.raises(Exception, match="expected dtype"):
-        entry(a.astype(np.int64), (0,), np.empty((), dtype=dtype), 2**60)
+        entry(a.astype(np.int64), (0,), 2**60)

@@ -1,68 +1,132 @@
-"""NaN-skipping sum: math hooks over shared contiguous/strided scanners.
+"""NaN-aware sum operation for the ``guvectorize`` driver.
 
-Preserves the measured wide-accumulator/EVL layout (2026-09-04 probes
-bench_wide_acc_evl and bench_evl_branch_cost): eight native-width FADD
-chains, one horizontal reduction per run, compile-time lane updates for
-the tail. Strided scans retain a scalar sum, without dynamic lane indexing.
-Integer specializations erase NaN handling. Empty/all-NaN sums are zero.
+The driver owns all rank, axis, stride, scratch, and scheduling decisions.
+``NanSum`` only receives a prepared one-dimensional read span and a writable
+one-element output span.  A contiguous source core is borrowed directly; a
+strided source core has already been copied by ``guvectorize`` into worker-local
+contiguous storage.  That makes the SIMD loop below identical for both cases
+and keeps layout branches out of the numerical kernel.
+
+The operation is specialized for each supported dtype.  Floating-point
+specializations ignore NaNs and integer specializations erase the NaN branch
+at compile time.  Empty and all-NaN cores naturally produce zero, matching
+``numpy.nansum`` and numbagg's nansum contract.
 """
 
-from std.math import isnan
+from std.algorithm import vectorize
+from std.collections import Span
+from std.math import isnan, pow
+from std.sys.info import simd_width_of
 
-from mojagg.core.reduce1d import NaNReduction1D, ReductionWidth
+from mojagg.drivers.guvectorize import (
+    CoreSpec,
+    Dim,
+    GUTensor,
+    GUFuncKernel,
+)
 
-comptime FADD_CHAINS_TARGET = 8
-"""Existing benchmarked chain count; not a universal target heuristic."""
+
+@always_inline
+def nan_sum_powered_value[
+    dtype: DType,
+    power: Int,
+](value: Scalar[dtype]) -> Scalar[dtype]:
+    """Return one valid input raised to the compile-time power."""
+
+    comptime assert power >= 0, "nansum power must be non-negative"
+    comptime if power == 0:
+        return Scalar[dtype](1)
+    elif power == 1:
+        return value
+    else:
+        return pow(value, power)
 
 
-struct NanSum[dtype: DType](NaNReduction1D):
-    comptime value_dtype = Self.dtype
-    comptime out_dtype = Self.dtype
-    comptime State = Scalar[Self.dtype]
-    comptime Out = Self.State
-    comptime block_lanes = ReductionWidth[
-        Self.dtype, FADD_CHAINS_TARGET
-    ].block_lanes
-    comptime Acc = SIMD[Self.dtype, Self.block_lanes]
+@always_inline
+def nan_sum_powered_block[
+    dtype: DType,
+    power: Int,
+    width: Int,
+](values: SIMD[dtype, width]) -> SIMD[dtype, width]:
+    """Raise a full SIMD block to a non-negative compile-time power."""
 
-    @staticmethod
-    def identity() -> Self.State:
-        return Self.State(0)
+    comptime assert power >= 0, "nansum power must be non-negative"
+    comptime if power == 0:
+        return SIMD[dtype, width](1)
+    elif power == 1:
+        return values
+    else:
+        var result = values
+        comptime for _ in range(power - 1):
+            result *= values
+        return result
 
-    @staticmethod
-    def acc_init() -> Self.Acc:
-        return Self.Acc(0)
 
-    @staticmethod
-    def step_scalar(state: Self.State, value: Scalar[Self.dtype]) -> Self.State:
-        comptime if Self.dtype.is_floating_point():
-            if isnan(value):
-                return state
-        return state + value
+@always_inline
+def nan_sum_contiguous[
+    dtype: DType,
+    power: Int = 1,
+](values: Span[Scalar[dtype], ImmUntrackedOrigin]) -> Scalar[dtype]:
+    """Reduce one already-contiguous core with a wide SIMD accumulator."""
 
-    @staticmethod
-    def step_simd(
-        mut acc: Self.Acc, values: SIMD[Self.dtype, Self.block_lanes]
-    ):
-        comptime if Self.dtype.is_floating_point():
-            acc += isnan(values).select(Self.Acc(0), values)
+    # Eight independent native-width groups retain the measured reduction
+    # throughput of the previous nansum kernel while leaving the driver free
+    # to materialize arbitrary input layouts once per slice.
+    comptime width = simd_width_of[dtype]() * 8
+    var acc = SIMD[dtype, width](0)
+    var pointer = values.unsafe_ptr()
+
+    def step[vector_width: Int](i: Int, evl: Int) {imm pointer, mut acc}:
+        if evl == width:
+            var block = pointer.unsafe_load[width=width](i)
+            comptime if power == 1:
+                comptime if dtype.is_floating_point():
+                    acc += isnan(block).select(SIMD[dtype, width](0), block)
+                else:
+                    acc += block
+            else:
+                var powered = nan_sum_powered_block[dtype, power, width](block)
+                comptime if dtype.is_floating_point():
+                    powered = isnan(block).select(
+                        SIMD[dtype, width](0), powered
+                    )
+                acc += powered
         else:
-            acc += values
+            comptime for lane in range(width):
+                if lane < evl:
+                    var value = pointer[unsafe_offset=i + lane]
+                    comptime if dtype.is_floating_point():
+                        if not isnan(value):
+                            comptime if power == 1:
+                                acc[lane] += value
+                            else:
+                                acc[lane] += nan_sum_powered_value[
+                                    dtype, power
+                                ](value)
+                    else:
+                        comptime if power == 1:
+                            acc[lane] += value
+                        else:
+                            acc[lane] += nan_sum_powered_value[dtype, power](
+                                value
+                            )
 
-    @staticmethod
-    def step_tail[lane: Int](mut acc: Self.Acc, value: Scalar[Self.dtype]):
-        acc[lane] = Self.step_scalar(acc[lane], value)
+    vectorize[width](len(values), step)
+    return acc.reduce_add()
 
-    @staticmethod
-    def collapse(acc: Self.Acc) -> Self.State:
-        return acc.reduce_add()
 
-    @staticmethod
-    def combine(acc: Self.State, partial: Self.State) -> Self.State:
-        return acc + partial
+@fieldwise_init
+struct NanSum[dtype: DType, power: Int = 1](GUFuncKernel, ImplicitlyCopyable):
+    """SIMD ``(n) -> ()`` nansum operation."""
 
-    def __init__(out self):
-        pass
+    comptime Signature = Tuple[
+        GUTensor[Self.dtype, False, CoreSpec[Dim[0]]],
+        GUTensor[Self.dtype, True, CoreSpec[]],
+    ]
 
-    def finalize(self, state: Self.State) -> Self.Out:
-        return state
+    @always_inline
+    def __call__(mut self, tensors: Self.Signature):
+        var input, output = tensors
+        var values = input.read_span()
+        var result = nan_sum_contiguous[Self.dtype, Self.power](values)
+        output.write_span()[0] = result

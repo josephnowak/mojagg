@@ -1,9 +1,8 @@
 [workspace]
 channels = ["https://conda.modular.com/max", "conda-forge"]
 name = "mojagg"
-# linux-64 is the primary dev/CI target; osx-arm64 and win-64 added as the
-# Mojo toolchain support lands (Mojo has no native Windows target yet).
-platforms = ["linux-64"]
+# linux-64, osx-arm64, and linux-aarch64 are the primary release targets
+platforms = ["linux-64", "osx-arm64", "linux-aarch64"]
 version = "0.1.0"
 
 [tasks]
@@ -12,7 +11,7 @@ build-ext = "python scripts/build_ext.py"
 # Build a platform wheel into dist/
 build-wheel = "python scripts/build_ext.py --wheel"
 # Mojo unit tests
-test-mojo = "mojo run -I src tests/mojo/test_reduce1d.mojo"
+test-mojo = "mojo run -I src tests/mojo/test_gufunc.mojo"
 # Python parity tests (numbagg comparison)
 test = "pytest tests/python -q"
 # Lint: ruff (py) + mojo format check + kernel conventions
@@ -24,7 +23,7 @@ bench-reference = { cmd = "python -m benchmarks.compare_numbagg", env = { PYTHON
 [dependencies]
 mojo = ">=1.0.0,<2"
 max = ">=26.5.0,<27"
-python = ">=3.11"
+python = ">=3.10"
 pip = ">=25"
 setuptools = ">=69"
 wheel = ">=0.45"
@@ -34,6 +33,38 @@ numpy = ">=2.0"
 numbagg = ">=0.3"      # parity-testing reference
 bottleneck = ">=1.4"
 ruff = ">=0.8"
+pandas = ">=2.0,<4"
+
+[target.linux-64.dependencies]
 auditwheel = ">=6"     # manylinux wheel repair
 patchelf = ">=0.19.1,<0.20"
-pandas = ">=3.0.5,<4"
+
+[target.linux-aarch64.dependencies]
+auditwheel = ">=6"     # manylinux wheel repair
+patchelf = ">=0.19.1,<0.20"
+
+[target.osx-arm64.dependencies]
+delocate = ">=0.11"
+
+[feature.py310.dependencies]
+python = "3.10.*"
+
+[feature.py311.dependencies]
+python = "3.11.*"
+
+[feature.py312.dependencies]
+python = "3.12.*"
+
+[feature.py313.dependencies]
+python = "3.13.*"
+
+[feature.py314.dependencies]
+python = "3.14.*"
+
+[environments]
+default = ["py314"]
+py310 = ["py310"]
+py311 = ["py311"]
+py312 = ["py312"]
+py313 = ["py313"]
+py314 = ["py314"]
