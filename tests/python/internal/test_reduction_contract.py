@@ -85,3 +85,56 @@ def test_empty_multi_slices(dtype, shape):
         (mojagg.nansum, lambda x: np.nansum(x, axis=(0, 2))),
     ):
         np.testing.assert_array_equal(op(a, axis=(0, 2)), ref(a))
+
+
+@pytest.mark.parametrize("dtype", [np.float32, np.float64, np.int32, np.int64])
+def test_extrema_and_arg_extrema_first_occurrence_and_boundaries(dtype):
+
+    floating = np.issubdtype(dtype, np.floating)
+
+    for n in (1, 2, 7, 16, 17, 32, 64, 65, 128, 130):
+        # Array with duplicate extrema at index 1 and index n - 1
+        a = (np.arange(n) + 10).astype(dtype)
+        if n > 1:
+            a[1] = 5
+            a[-1] = 5
+            # nanargmin must pick index 1 (first occurrence)
+            assert mojagg.nanargmin(a) == 1
+            assert mojagg.nanmin(a) == 5
+
+            a[1] = 1000
+            a[-1] = 1000
+            # nanargmax must pick index 1 (first occurrence)
+            assert mojagg.nanargmax(a) == 1
+            assert mojagg.nanmax(a) == 1000
+
+        # Boundary infinities
+        if floating:
+            # All +inf
+            inf_arr = np.full(n, np.inf, dtype=dtype)
+            assert mojagg.nanargmin(inf_arr) == 0
+            assert mojagg.nanmin(inf_arr) == np.inf
+
+            # All -inf
+            ninf_arr = np.full(n, -np.inf, dtype=dtype)
+            assert mojagg.nanargmax(ninf_arr) == 0
+            assert mojagg.nanmax(ninf_arr) == -np.inf
+
+            # All NaN
+            nan_arr = np.full(n, np.nan, dtype=dtype)
+            assert np.isnan(mojagg.nanmin(nan_arr))
+            assert np.isnan(mojagg.nanmax(nan_arr))
+            with pytest.raises(ValueError, match="All-NaN slice"):
+                mojagg.nanargmin(nan_arr)
+            with pytest.raises(ValueError, match="All-NaN slice"):
+                mojagg.nanargmax(nan_arr)
+        else:
+            # Integer min / max
+            info = np.iinfo(dtype)
+            min_arr = np.full(n, info.min, dtype=dtype)
+            assert mojagg.nanargmin(min_arr) == 0
+            assert mojagg.nanmin(min_arr) == info.min
+
+            max_arr = np.full(n, info.max, dtype=dtype)
+            assert mojagg.nanargmax(max_arr) == 0
+            assert mojagg.nanmax(max_arr) == info.max

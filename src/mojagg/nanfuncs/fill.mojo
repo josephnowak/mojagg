@@ -1,13 +1,14 @@
 """Forward and backward fill operations for the generic GUFunc driver.
 
 The driver presents one contiguous input and output span for every logical
-core. A fill is stateful along that span, so it deliberately stays scalar for
-floating point values; integer specializations are a bulk copy because they
-cannot contain NaNs.
+core. A fill is stateful along that span, so it uses SIMD chunk loading with
+an internal recurrence step; integer specializations are a bulk copy because
+they cannot contain NaNs.
 """
 
 from std.math import isnan
 from std.memory import unsafe_memcpy
+from std.sys.info import simd_width_of
 
 from mojagg.core.numeric import nan_or_zero
 from mojagg.drivers.guvectorize import (
@@ -22,7 +23,7 @@ struct FillKernel[
     dtype: DType,
     backward: Bool = False,
 ](GUFuncKernel, ImplicitlyCopyable):
-    """Fill NaN runs in one core.
+    """Fill NaN runs in one contiguous core span using unified chunked SIMD loads.
 
     ``limit < 0`` permits an unlimited run after a valid value. A nonnegative
     limit permits at most that many missing values to inherit the last valid
@@ -41,19 +42,63 @@ struct FillKernel[
 
     @always_inline
     @staticmethod
-    def _start(n: Int) -> Int:
+    def _chunk_start(n: Int, width: Int) -> Int:
         comptime if Self.backward:
-            return n - 1
+            return n - width
         else:
             return 0
 
     @always_inline
     @staticmethod
-    def _step() -> Int:
+    def _chunk_step(width: Int) -> Int:
+        comptime if Self.backward:
+            return -width
+        else:
+            return width
+
+    @always_inline
+    @staticmethod
+    def _chunk_valid(offset: Int, n: Int, width: Int) -> Bool:
+        comptime if Self.backward:
+            return offset >= 0
+        else:
+            return offset + width <= n
+
+    @always_inline
+    @staticmethod
+    def _tail_start(offset: Int, width: Int) -> Int:
+        comptime if Self.backward:
+            return offset + width - 1
+        else:
+            return offset
+
+    @always_inline
+    @staticmethod
+    def _tail_step() -> Int:
         comptime if Self.backward:
             return -1
         else:
             return 1
+
+    @always_inline
+    def _apply_step(
+        self,
+        value: Scalar[Self.dtype],
+        dest_idx: Int,
+        mut current: Scalar[Self.dtype],
+        mut remaining: Int,
+        allowed: Int,
+        dest_ptr: Pointer[mut=True, Scalar[Self.dtype], MutUntrackedOrigin],
+    ):
+        """Internal recurrence step updating state and committing output."""
+        if isnan(value):
+            if remaining <= 0:
+                current = nan_or_zero[Self.dtype]()
+            remaining -= 1
+        else:
+            current = value
+            remaining = allowed
+        dest_ptr[unsafe_offset=dest_idx] = current
 
     @always_inline
     def __call__(mut self, tensors: Self.Signature):
@@ -62,29 +107,63 @@ struct FillKernel[
         var destination = destination_view.write_span()
         var n = len(source)
 
-        comptime if Self.dtype.is_floating_point():
-            var current = nan_or_zero[Self.dtype]()
-            var allowed = self.limit if self.limit >= 0 else n
-            var remaining = allowed
-            var i = Self._start(n)
-            var step = Self._step()
-            while i >= 0 and i < n:
-                var value = source.unsafe_ptr()[unsafe_offset=i]
-                if isnan(value):
-                    if remaining <= 0:
-                        current = nan_or_zero[Self.dtype]()
-                    remaining -= 1
-                else:
-                    current = value
-                    remaining = allowed
-                destination.unsafe_ptr()[unsafe_offset=i] = current
-                i += step
-        else:
+        if n <= 0:
+            return
+
+        # Integers cannot contain NaNs; delegate to bulk copy
+        comptime if not Self.dtype.is_floating_point():
             unsafe_memcpy(
                 dest=destination.unsafe_ptr(),
                 src=source.unsafe_ptr(),
                 count=n,
             )
+            return
+
+        comptime width = simd_width_of[Self.dtype]() * 2
+        var current = nan_or_zero[Self.dtype]()
+        var allowed = self.limit if self.limit >= 0 else n
+        var remaining = allowed
+        var src_ptr = source.unsafe_ptr()
+        var dest_ptr = destination.unsafe_ptr()
+
+        # -----------------------------------------------------------------
+        # 1. Unified SIMD Chunk Loop
+        # -----------------------------------------------------------------
+        var offset = Self._chunk_start(n, width)
+        var chunk_step = Self._chunk_step(width)
+
+        while Self._chunk_valid(offset, n, width):
+            var block = src_ptr.unsafe_load[width=width](offset)
+
+            comptime for i in range(width):
+                comptime lane = (width - 1 - i) if Self.backward else i
+                self._apply_step(
+                    block[lane],
+                    offset + lane,
+                    current,
+                    remaining,
+                    allowed,
+                    dest_ptr,
+                )
+
+            offset += chunk_step
+
+        # -----------------------------------------------------------------
+        # 2. Unified Scalar Tail Loop
+        # -----------------------------------------------------------------
+        var tail_i = Self._tail_start(offset, width)
+        var tail_step = Self._tail_step()
+
+        while tail_i >= 0 and tail_i < n:
+            self._apply_step(
+                src_ptr[unsafe_offset=tail_i],
+                tail_i,
+                current,
+                remaining,
+                allowed,
+                dest_ptr,
+            )
+            tail_i += tail_step
 
 
 comptime FFill[dtype: DType] = FillKernel[dtype, False]

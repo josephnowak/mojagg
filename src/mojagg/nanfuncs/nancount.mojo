@@ -4,6 +4,7 @@ from std.algorithm import vectorize
 from std.math import isnan
 from std.sys.info import simd_width_of
 
+from mojagg.core.numeric import load_block_or_identity, nan_or_zero
 from mojagg.drivers.guvectorize import (
     CoreSpec,
     Dim,
@@ -31,7 +32,7 @@ struct NanCount[dtype: DType](GUFuncKernel, ImplicitlyCopyable):
             output.write_span()[0] = Int64(len(values))
             return
 
-        comptime width = simd_width_of[Self.dtype]()
+        comptime width = simd_width_of[Self.dtype]() * 8
         var pointer = values.unsafe_ptr()
         var count = SIMD[DType.float64, width](0.0)
         var zero = SIMD[DType.float64, width](0.0)
@@ -40,15 +41,10 @@ struct NanCount[dtype: DType](GUFuncKernel, ImplicitlyCopyable):
         def step[
             vector_width: Int
         ](i: Int, evl: Int) {imm pointer, mut count, imm zero, imm one}:
-            if evl == width:
-                var block = pointer.unsafe_load[width=width](i)
-                count += isnan(block).select(zero, one)
-            else:
-                comptime for lane in range(width):
-                    if lane < evl and not isnan(
-                        pointer[unsafe_offset=i + lane]
-                    ):
-                        count[lane] += 1.0
+            var block = load_block_or_identity[Self.dtype, width](
+                pointer, i, evl, nan_or_zero[Self.dtype]()
+            )
+            count += isnan(block).select(zero, one)
 
         vectorize[width](len(values), step)
         output.write_span()[0] = Int64(count.reduce_add())

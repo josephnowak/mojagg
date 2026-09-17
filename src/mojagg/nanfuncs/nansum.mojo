@@ -15,31 +15,16 @@ at compile time.  Empty and all-NaN cores naturally produce zero, matching
 
 from std.algorithm import vectorize
 from std.collections import Span
-from std.math import isnan, pow
+from std.math import isnan
 from std.sys.info import simd_width_of
 
+from mojagg.core.numeric import load_block_or_identity
 from mojagg.drivers.guvectorize import (
     CoreSpec,
     Dim,
     GUTensor,
     GUFuncKernel,
 )
-
-
-@always_inline
-def nan_sum_powered_value[
-    dtype: DType,
-    power: Int,
-](value: Scalar[dtype]) -> Scalar[dtype]:
-    """Return one valid input raised to the compile-time power."""
-
-    comptime assert power >= 0, "nansum power must be non-negative"
-    comptime if power == 0:
-        return Scalar[dtype](1)
-    elif power == 1:
-        return value
-    else:
-        return pow(value, power)
 
 
 @always_inline
@@ -77,39 +62,19 @@ def nan_sum_contiguous[
     var pointer = values.unsafe_ptr()
 
     def step[vector_width: Int](i: Int, evl: Int) {imm pointer, mut acc}:
-        if evl == width:
-            var block = pointer.unsafe_load[width=width](i)
-            comptime if power == 1:
-                comptime if dtype.is_floating_point():
-                    acc += isnan(block).select(SIMD[dtype, width](0), block)
-                else:
-                    acc += block
+        var block = load_block_or_identity[dtype, width](
+            pointer, i, evl, Scalar[dtype](0)
+        )
+        comptime if power == 1:
+            comptime if dtype.is_floating_point():
+                acc += isnan(block).select(SIMD[dtype, width](0), block)
             else:
-                var powered = nan_sum_powered_block[dtype, power, width](block)
-                comptime if dtype.is_floating_point():
-                    powered = isnan(block).select(
-                        SIMD[dtype, width](0), powered
-                    )
-                acc += powered
+                acc += block
         else:
-            comptime for lane in range(width):
-                if lane < evl:
-                    var value = pointer[unsafe_offset=i + lane]
-                    comptime if dtype.is_floating_point():
-                        if not isnan(value):
-                            comptime if power == 1:
-                                acc[lane] += value
-                            else:
-                                acc[lane] += nan_sum_powered_value[
-                                    dtype, power
-                                ](value)
-                    else:
-                        comptime if power == 1:
-                            acc[lane] += value
-                        else:
-                            acc[lane] += nan_sum_powered_value[dtype, power](
-                                value
-                            )
+            var powered = nan_sum_powered_block[dtype, power, width](block)
+            comptime if dtype.is_floating_point():
+                powered = isnan(block).select(SIMD[dtype, width](0), powered)
+            acc += powered
 
     vectorize[width](len(values), step)
     return acc.reduce_add()

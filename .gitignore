@@ -29,13 +29,7 @@ uv.lock
 Thumbs.db
 desktop.ini
 
-# Benchmark artifacts
-benchmarks/results/*.csv
-benchmarks/results/*.json
-!benchmarks/results/.gitkeep
-
 # Local clones & workspace scratch
 .analysis/
 mojo-plugin-jetbrains/
 numbagg_upstream/
-

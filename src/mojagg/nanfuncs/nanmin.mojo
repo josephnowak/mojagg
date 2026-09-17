@@ -2,10 +2,14 @@
 
 from std.algorithm import vectorize
 from std.collections import Span
-from std.math import isnan, max, min
 from std.sys.info import simd_width_of
 
-from mojagg.core.numeric import nan_or_zero, neg_inf_or_min, pos_inf_or_max
+from mojagg.core.numeric import (
+    load_block_or_identity,
+    nan_or_zero,
+    neg_inf_or_min,
+    pos_inf_or_max,
+)
 from mojagg.drivers.guvectorize import (
     CoreSpec,
     Dim,
@@ -18,66 +22,68 @@ from mojagg.drivers.guvectorize import (
 def nan_extreme_contiguous[
     dtype: DType,
     is_min: Bool,
-](
-    values: Span[Scalar[dtype], ImmUntrackedOrigin],
-) -> Tuple[
-    Scalar[dtype], Float64
-]:
-    """Reduce one contiguous core with SIMD min/max and a valid count."""
+](values: Span[Scalar[dtype], ImmUntrackedOrigin],) -> Scalar[dtype]:
+    """Reduce one contiguous core with pure SIMD relational selection.
+
+    Note on Hardware NaN Discrepancies:
+    Standard min/max instructions and math library functions behave inconsistently
+    across CPU architectures and parameter orderings in the presence of NaNs
+    (e.g., x86 minps vs ARM fminnm, or min(a, b) vs min(b, a)). Using pure
+    relational SIMD comparisons (< and >) with .select() eliminates this entire
+    class of discrepancies, because IEEE 754 guarantees that relational comparisons
+    with NaN always evaluate to False in hardware across all architectures.
+    This also unifies integer and floating-point implementations with zero
+    runtime branching or dtype-specific logic.
+    """
 
     comptime width = simd_width_of[dtype]() * 8
     var identity = pos_inf_or_max[dtype]() if is_min else neg_inf_or_min[
         dtype
     ]()
-    var identity_vector = SIMD[dtype, width](identity)
-    var accumulator = identity_vector
-    var valid_count = SIMD[DType.float64, width](0.0)
-    var zero = SIMD[DType.float64, width](0.0)
-    var one = SIMD[DType.float64, width](1.0)
+    var pad_val = nan_or_zero[
+        dtype
+    ]() if dtype.is_floating_point() else identity
+
+    var accumulator = SIMD[dtype, width](identity)
+    var has_valid_mask = SIMD[DType.bool, width](fill=False)
     var pointer = values.unsafe_ptr()
 
     def step[
         vector_width: Int
     ](i: Int, evl: Int) {
-        imm pointer,
-        mut accumulator,
-        mut valid_count,
-        imm identity_vector,
-        imm zero,
-        imm one,
+        imm pointer, mut accumulator, imm pad_val, mut has_valid_mask
     }:
-        if evl == width:
-            var block = pointer.unsafe_load[width=width](i)
-            var block_values = block
-            comptime if dtype.is_floating_point():
-                var missing = isnan(block)
-                block_values = missing.select(identity_vector, block)
-                valid_count += missing.select(zero, one)
-            else:
-                valid_count += one
-
-            comptime if is_min:
-                accumulator = min(accumulator, block_values)
-            else:
-                accumulator = max(accumulator, block_values)
+        var block = load_block_or_identity[dtype, width](
+            pointer, i, evl, pad_val
+        )
+        # We equal comparison to detect inf cases as not nan
+        var is_better: SIMD[DType.bool, width]
+        comptime if is_min:
+            is_better = block.le(accumulator)
         else:
+            is_better = block.ge(accumulator)
+
+        if evl < width:
             comptime for lane in range(width):
-                if lane < evl:
-                    var value = pointer[unsafe_offset=i + lane]
-                    comptime if dtype.is_floating_point():
-                        if isnan(value):
-                            continue
-                    valid_count[lane] += 1.0
-                    comptime if is_min:
-                        accumulator[lane] = min(accumulator[lane], value)
-                    else:
-                        accumulator[lane] = max(accumulator[lane], value)
+                if lane >= evl:
+                    is_better[lane] = False
+
+        accumulator = is_better.select(block, accumulator)
+        # It is impossible to detect the all NaNs and all inf cases without
+        # an additional bitmask.
+        comptime if dtype.is_floating_point():
+            has_valid_mask |= is_better
 
     vectorize[width](len(values), step)
     var result = (
         accumulator.reduce_min() if is_min else accumulator.reduce_max()
     )
-    return (result, valid_count.reduce_add())
+
+    comptime if dtype.is_floating_point():
+        var any_valid = has_valid_mask.reduce_or()
+        if not any_valid:
+            result = nan_or_zero[dtype]()
+    return result
 
 
 @fieldwise_init
@@ -99,11 +105,8 @@ struct NanExtrema[
     def __call__(mut self, tensors: Self.Signature):
         var input, output = tensors
         var values = input.read_span()
-        var state = nan_extreme_contiguous[Self.dtype, Self.is_min](values)
-        if state[1] == 0.0:
-            output.write_span()[0] = nan_or_zero[Self.out_dtype]()
-        else:
-            output.write_span()[0] = Scalar[Self.out_dtype](state[0])
+        var result = nan_extreme_contiguous[Self.dtype, Self.is_min](values)
+        output.write_span()[0] = Scalar[Self.out_dtype](result)
 
 
 comptime NanMin[

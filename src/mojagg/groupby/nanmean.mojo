@@ -4,7 +4,7 @@ from std.algorithm import vectorize
 from std.math import isnan
 from std.sys.info import simd_width_of
 
-from mojagg.core.numeric import nan_or_zero
+from mojagg.core.numeric import load_block_or_identity, nan_or_zero
 from mojagg.groupby.group_kernel import GroupKernel
 from mojagg.drivers.guvectorize import (
     CoreSpec,
@@ -69,25 +69,19 @@ struct GroupNanMean[
             imm destination_ptr,
             imm count_ptr,
         }:
-            if evl == width:
-                var value_block = value_ptr.unsafe_load[width=width](i)
-                var label_block = label_ptr.unsafe_load[width=width](i)
-                comptime for lane in range(width):
-                    Self._add_lane(
-                        destination_ptr,
-                        count_ptr,
-                        label_block[lane],
-                        value_block[lane],
-                    )
-            else:
-                comptime for lane in range(width):
-                    if lane < evl:
-                        Self._add_lane(
-                            destination_ptr,
-                            count_ptr,
-                            label_ptr[unsafe_offset=i + lane],
-                            value_ptr[unsafe_offset=i + lane],
-                        )
+            var value_block = load_block_or_identity[Self.value_t, width](
+                value_ptr, i, evl, Scalar[Self.value_t](0)
+            )
+            var label_block = load_block_or_identity[Self.label_t, width](
+                label_ptr, i, evl, Scalar[Self.label_t](-1)
+            )
+            comptime for lane in range(width):
+                Self._add_lane(
+                    destination_ptr,
+                    count_ptr,
+                    label_block[lane],
+                    value_block[lane],
+                )
 
         vectorize[width](len(values), step)
 

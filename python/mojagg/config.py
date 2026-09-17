@@ -42,10 +42,8 @@ class MojaggConfig:
     # Parallel kicks in only when the outer loop has at least
     # ``parallel_min_groups`` iterations and each input core has at least this
     # many elements.
-    # Conservative placeholder pending native-Linux calibration of this
-    # per-core threshold; WSL2 thread-wake measurements are not portable.
-    parallel_threshold: int = 2_000_000
-    parallel_min_groups: int = 64
+    parallel_threshold: int = 200_000
+    parallel_min_groups: int = 16
     gpu_min_bytes: int = 1 << 26  # 64 MiB
     simd_width: int = 0  # 0 = native
 

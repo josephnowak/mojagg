@@ -19,9 +19,10 @@ That's it — no `PYPI_API_TOKEN` secret anywhere. The workflow exchanges a shor
 
 ### CodSpeed
 
-1. Install the CodSpeed GitHub App on the repo: <https://github.com/apps/codspeed-hq>
-2. Copy the repo's CodSpeed token into **Settings → Secrets → Actions → `CODSPEED_TOKEN`**.
-3. Free for public/open-source repos.
+Install the [CodSpeed GitHub App](https://github.com/apps/codspeed-hq) and add
+the repository token as `CODSPEED_TOKEN` under **Settings → Secrets → Actions**.
+The workflow runs only `benchmarks/codspeed/`; the larger public comparison is
+run manually on the selected AWS host.
 
 ## Cutting a release
 
@@ -57,14 +58,15 @@ SemVer, strictly. Performance-sensitive downstream code pins against us.
 - `MINOR`: new functions, backward-compatible
 - `PATCH`: fixes and pure performance improvements
 
-## Benchmarks per release
+## Publishable benchmark snapshot
 
-Before tagging a release, regenerate the publishable numbers on the pinned
-benchmark host so the README table stays honest:
+Run the public profile on the pinned AWS host when a new public comparison is
+needed:
 
-```bash
-python benchmarks/full_matrix.py --out benchmarks/results/
+```powershell
+powershell.exe -NoProfile -ExecutionPolicy Bypass -File scripts/mojagg.ps1 bench-public --profile public --output docs/benchmarks/latest/index.html
 ```
 
-Commit the results with the release. (A `benchmark-aws.yml` manual workflow to
-do this on a dedicated instance is planned.)
+Commit `docs/benchmarks/latest/index.html` and its generated `results.json`.
+The future documentation deployment can publish the tracked static report;
+it should not rerun this workload on every CI build.

@@ -5,7 +5,7 @@ from std.collections import Span
 from std.math import isnan, sqrt
 from std.sys.info import simd_width_of
 
-from mojagg.core.numeric import nan_or_zero
+from mojagg.core.numeric import load_block_or_identity, nan_or_zero
 from mojagg.drivers.guvectorize import (
     CoreSpec,
     Dim,
@@ -33,21 +33,13 @@ def nan_squared_deviation_contiguous[
 
     def step[
         vector_width: Int
-    ](i: Int, evl: Int) {
-        imm pointer, mut squared, imm zero, imm mean_vector, imm mean
-    }:
-        if evl == width:
-            var block = pointer.unsafe_load[width=width](i)
-            var widened = block.cast[DType.float64]()
-            var delta = widened - mean_vector
-            squared += isnan(block).select(zero, delta * delta)
-        else:
-            comptime for lane in range(width):
-                if lane < evl:
-                    var value = pointer[unsafe_offset=i + lane]
-                    if not isnan(value):
-                        var delta = Float64(value) - mean
-                        squared[lane] += delta * delta
+    ](i: Int, evl: Int) {imm pointer, mut squared, imm zero, imm mean_vector}:
+        var block = load_block_or_identity[dtype, width](
+            pointer, i, evl, nan_or_zero[dtype]()
+        )
+        var widened = block.cast[DType.float64]()
+        var delta = widened - mean_vector
+        squared += isnan(block).select(zero, delta * delta)
 
     vectorize[width](len(values), step)
     return squared.reduce_add()

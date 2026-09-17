@@ -39,6 +39,7 @@ or --env py313.
 
 Commands:
   install       Install Pixi in WSL and resolve the locked project environment.
+  lock          Regenerate pixi.lock from pixi.toml.
   doctor        Check WSL, Pixi, Mojo, Python, pytest, search tools, and binaries.
   files [text]  List files under python, src, and tests.
   search <expr> Search source text under python, src, and tests.
@@ -48,12 +49,9 @@ Commands:
   test          Build the extension, then run Mojo and Python tests.
   lint          Run the repository lint task.
   format        Format Python and Mojo sources through Pixi.
-  bench-quick   Build the extension and run quick benchmarks.
-  bench-reference
-                Build the extension and run the numbagg reference matrix.
-  bench-full    Build the extension and run the full benchmark matrix.
-  reduction-contract
-                Build the extension and run the native reduction contract.
+  bench-codspeed
+                Build the extension and run the lightweight CodSpeed suite.
+  bench-public  Build the extension and run the manual HTML comparison.
   clean-native  Remove generated native binaries under python/mojagg only.
 
 Examples:
@@ -69,6 +67,7 @@ $aliases = @{
     "-h" = "help"
     "--help" = "help"
     "install" = "install"
+    "lock" = "lock"
     "doctor" = "doctor"
     "files" = "files"
     "search" = "search"
@@ -79,10 +78,8 @@ $aliases = @{
     "test" = "test"
     "lint" = "lint"
     "format" = "format"
-    "bench-quick" = "bench-quick"
-    "bench-reference" = "bench-reference"
-    "bench-full" = "bench-full"
-    "reduction-contract" = "reduction-contract"
+    "bench-codspeed" = "bench-codspeed"
+    "bench-public" = "bench-public"
     "clean-native" = "clean-native"
 }
 
@@ -181,6 +178,13 @@ if [ ! -x "\$HOME/.pixi/bin/rg" ] && ! command -v rg >/dev/null 2>&1; then
     "\$PIXI" global install ripgrep
 fi
 printf '%s\n' 'WSL project environment is ready.'
+'@
+        break
+    }
+    "lock" {
+        @'
+ensure_pixi
+"\$PIXI" lock
 '@
         break
     }
@@ -301,39 +305,21 @@ run_pixi format
 '@
         break
     }
-    "bench-quick" {
+    "bench-codspeed" {
         @'
 ensure_pixi
 "\$PIXI" install --locked
 run_pixi build-ext
-run_pixi pytest benchmarks -q --benchmark-quick "\$@"
+run_pixi bench-codspeed "\$@"
 '@
         break
     }
-    "bench-reference" {
+    "bench-public" {
         @'
 ensure_pixi
 "\$PIXI" install --locked
 run_pixi build-ext
-PYTHONPATH=python run_pixi python -m benchmarks.compare_numbagg "\$@"
-'@
-        break
-    }
-    "bench-full" {
-        @'
-ensure_pixi
-"\$PIXI" install --locked
-run_pixi build-ext
-PYTHONPATH=python run_pixi python benchmarks/full_matrix.py "\$@"
-'@
-        break
-    }
-    "reduction-contract" {
-        @'
-ensure_pixi
-"\$PIXI" install --locked
-run_pixi build-ext
-PYTHONPATH=python run_pixi python benchmarks/reduction_contract.py "\$@"
+PYTHONPATH=python run_pixi python benchmarks/public_benchmark.py "\$@"
 '@
         break
     }

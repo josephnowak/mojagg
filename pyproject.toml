@@ -24,10 +24,9 @@ dependencies = [
 ]
 
 [project.optional-dependencies]
-# Parity testing + benchmarking against the reference implementations.
 benchmark = [
     "numbagg>=0.3",
-    "numpy-groupies>=0.11",
+    "pandas>=2.0",
     "pytest>=8",
     "pytest-codspeed>=3",
 ]
@@ -69,6 +68,9 @@ extend-exclude = ["tests/vendor", ".analysis"]
 
 [tool.ruff.lint]
 select = ["E", "F", "I", "UP", "B", "SIM", "C4", "PTH"]
+
+[tool.ruff.lint.per-file-ignores]
+"benchmarks/public_benchmark.py" = ["E501"]
 
 [tool.pytest.ini_options]
 pythonpath = ["python", "."]

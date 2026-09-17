@@ -36,7 +36,10 @@ jobs:
       - name: Mojo conventions lint
         run: pixi run python scripts/lint_mojo.py
 
-  test-mojo:
+  # Keep the matrix checks separate from the stable names used by branch
+  # protection. Matrix checks include their dimensions in the check name.
+  test-mojo-matrix:
+    name: test-mojo (${{ matrix.os }})
     runs-on: ${{ matrix.os }}
     needs: lint
     strategy:
@@ -52,7 +55,8 @@ jobs:
       - name: mojo test
         run: pixi run test-mojo
 
-  test-python:
+  test-python-matrix:
+    name: test-python (${{ matrix.os }}, ${{ matrix.environment }})
     runs-on: ${{ matrix.os }}
     needs: lint
     strategy:
@@ -72,6 +76,36 @@ jobs:
         run: pixi run -e ${{ matrix.environment }} build-ext
       - name: Parity tests vs numbagg (skip GPU)
         run: pixi run -e ${{ matrix.environment }} test
+
+  test-mojo:
+    name: test-mojo
+    if: always()
+    needs: test-mojo-matrix
+    runs-on: ubuntu-latest
+    steps:
+      - name: Report Mojo matrix result
+        run: |
+          result="${{ needs['test-mojo-matrix'].result }}"
+          echo "test-mojo matrix result: $result"
+          if [ "$result" != "success" ]; then
+            echo "The Mojo matrix did not complete successfully."
+            exit 1
+          fi
+
+  test-python:
+    name: test-python
+    if: always()
+    needs: test-python-matrix
+    runs-on: ubuntu-latest
+    steps:
+      - name: Report Python matrix result
+        run: |
+          result="${{ needs['test-python-matrix'].result }}"
+          echo "test-python matrix result: $result"
+          if [ "$result" != "success" ]; then
+            echo "The Python matrix did not complete successfully."
+            exit 1
+          fi
 
   wheel-build:
     runs-on: ${{ matrix.os }}
@@ -103,3 +137,18 @@ jobs:
           pixi run python -c "import mojagg, numpy as np; a=np.arange(10,dtype=np.float64); a[3]=np.nan; print('wheel smoke test:', mojagg.nansum(a))"
       - name: Check wheel size budget
         run: python scripts/check_wheel_size.py --max-mb 20 dist/*.whl dist/repaired/*.whl
+
+  wheel-size:
+    name: wheel-size
+    if: always()
+    needs: wheel-build
+    runs-on: ubuntu-latest
+    steps:
+      - name: Report wheel build result
+        run: |
+          result="${{ needs['wheel-build'].result }}"
+          echo "wheel-build matrix result: $result"
+          if [ "$result" != "success" ]; then
+            echo "The wheel build or wheel size check did not complete successfully."
+            exit 1
+          fi
