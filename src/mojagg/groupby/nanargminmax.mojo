@@ -4,6 +4,7 @@ from std.algorithm import vectorize
 from std.math import isnan
 from std.sys.info import simd_width_of
 
+from mojagg.core.numeric import load_block_or_identity
 from mojagg.drivers.guvectorize import (
     CoreSpec,
     Dim,
@@ -66,7 +67,7 @@ struct GroupNanArgMinMax[
         var best_values = best_output.write_span()
         var seen = seen_output.write_span()
 
-        comptime width = simd_width_of[Self.value_t]() * 8
+        comptime width = simd_width_of[Self.value_t]()
         var value_ptr = values.unsafe_ptr()
         var label_ptr = labels.unsafe_ptr()
         var destination_ptr = destination.unsafe_ptr()
@@ -82,28 +83,20 @@ struct GroupNanArgMinMax[
             imm best_ptr,
             imm seen_ptr,
         }:
-            if evl == width:
-                var value_block = value_ptr.unsafe_load[width=width](i)
-                var label_block = label_ptr.unsafe_load[width=width](i)
-                comptime for lane in range(width):
-                    Self._update_lane(
-                        destination_ptr,
-                        best_ptr,
-                        seen_ptr,
-                        label_block[lane],
-                        value_block[lane],
-                        i + lane,
-                    )
-            else:
-                comptime for lane in range(width):
-                    if lane < evl:
-                        Self._update_lane(
-                            destination_ptr,
-                            best_ptr,
-                            seen_ptr,
-                            label_ptr[unsafe_offset=i + lane],
-                            value_ptr[unsafe_offset=i + lane],
-                            i + lane,
-                        )
+            var value_block = load_block_or_identity[Self.value_t, width](
+                value_ptr, i, evl, Scalar[Self.value_t](0)
+            )
+            var label_block = load_block_or_identity[Self.label_t, width](
+                label_ptr, i, evl, Scalar[Self.label_t](-1)
+            )
+            comptime for lane in range(width):
+                Self._update_lane(
+                    destination_ptr,
+                    best_ptr,
+                    seen_ptr,
+                    label_block[lane],
+                    value_block[lane],
+                    i + lane,
+                )
 
         vectorize[width](len(values), step)

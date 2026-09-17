@@ -21,9 +21,8 @@ mojagg replicates [numbagg](https://github.com/numbagg/numbagg) 1:1 (API + seman
 | Python parity tests | `powershell.exe -NoProfile -ExecutionPolicy Bypass -File scripts/mojagg.ps1 test-python` |
 | Lint everything | `powershell.exe -NoProfile -ExecutionPolicy Bypass -File scripts/mojagg.ps1 lint` |
 | Format | `powershell.exe -NoProfile -ExecutionPolicy Bypass -File scripts/mojagg.ps1 format` |
-| Quick bench | `powershell.exe -NoProfile -ExecutionPolicy Bypass -File scripts/mojagg.ps1 bench-quick` |
-| Numbagg reference matrix | `powershell.exe -NoProfile -ExecutionPolicy Bypass -File scripts/mojagg.ps1 bench-reference` |
-| Full bench matrix | `powershell.exe -NoProfile -ExecutionPolicy Bypass -File scripts/mojagg.ps1 bench-full` |
+| Lightweight CodSpeed suite | `powershell.exe -NoProfile -ExecutionPolicy Bypass -File scripts/mojagg.ps1 bench-codspeed` |
+| Manual public HTML report | `powershell.exe -NoProfile -ExecutionPolicy Bypass -File scripts/mojagg.ps1 bench-public --profile quick` |
 
 Use `--env py310`, `--env py311`, `--env py312`, `--env py313`, or `--env py314` when a specific locked Python environment is required.
 
@@ -37,7 +36,7 @@ src/mojagg/            Mojo package
   python/              PythonModuleBuilder bindings (one module per family)
 python/mojagg/         Python facade: numbagg-identical signatures, config ctx manager, dtype validation
 tests/mojo/  tests/python/    unit tests / parity tests vs numbagg
-benchmarks/            pytest+codspeed benches, full_matrix.py, baselines/
+benchmarks/  public_benchmark.py, codspeed/ lightweight regression tests
 scripts/               lint_mojo.py, release helpers
 .github/workflows/     ci.yml, codspeed.yml, release.yml, dependabot, mojo-watch
 ```

@@ -27,7 +27,7 @@ def nan_or_zero[dtype: DType]() -> Scalar[dtype]:
     """Quiet NaN for float dtypes; 0 for ints (callers guarantee the int path
     is unreachable: integer kernels only reach this on empty slices, which the
     binding layer rejects first)."""
-    comptime if dtype == DType.float64 or dtype == DType.float32:
+    comptime if dtype.is_floating_point():
         var z = Scalar[dtype](0.0)
         return z / z  # IEEE 0/0 = NaN at runtime
     else:
@@ -37,7 +37,7 @@ def nan_or_zero[dtype: DType]() -> Scalar[dtype]:
 @always_inline
 def pos_inf_or_max[dtype: DType]() -> Scalar[dtype]:
     """+inf for floats, MAX for ints — identity element for min-reductions."""
-    comptime if dtype == DType.float64 or dtype == DType.float32:
+    comptime if dtype.is_floating_point():
         var z = Scalar[dtype](0.0)
         return Scalar[dtype](1.0) / z
     else:
@@ -47,8 +47,30 @@ def pos_inf_or_max[dtype: DType]() -> Scalar[dtype]:
 @always_inline
 def neg_inf_or_min[dtype: DType]() -> Scalar[dtype]:
     """-inf for floats, MIN for ints — identity element for max-reductions."""
-    comptime if dtype == DType.float64 or dtype == DType.float32:
+    comptime if dtype.is_floating_point():
         var z = Scalar[dtype](0.0)
         return Scalar[dtype](-1.0) / z
     else:
         return Scalar[dtype].MIN
+
+
+@always_inline
+def load_block_or_identity[
+    dtype: DType,
+    width: Int,
+    origin: Origin[mut=False] = ImmUntrackedOrigin,
+](
+    pointer: Pointer[mut=False, Scalar[dtype], origin],
+    i: Int,
+    evl: Int,
+    identity: Scalar[dtype],
+) -> SIMD[dtype, width]:
+    """Load a SIMD block from pointer, pre-filling lanes past evl with identity.
+    """
+    if evl == width:
+        return pointer.unsafe_load[width=width](i)
+    var block = SIMD[dtype, width](identity)
+    comptime for lane in range(width):
+        if lane < evl:
+            block[lane] = pointer[unsafe_offset=i + lane]
+    return block

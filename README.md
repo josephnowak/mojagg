@@ -3,7 +3,7 @@
 ## Development workflow
 
 Development on Windows always runs through Ubuntu WSL. Use the single wrapper
-for setup, source discovery, compilation, tests, linting, and benchmarks:
+for setup, source discovery, compilation, tests, and linting:
 
 ```powershell
 powershell.exe -NoProfile -ExecutionPolicy Bypass -File scripts/mojagg.ps1 install
@@ -33,47 +33,6 @@ If you know [numbagg](https://github.com/numbagg/numbagg), you already know moja
 - **Tunable**: every dispatch decision (parallel thresholds, worker counts, backend) is configurable per-call, globally, or by env var.
 - **Honest**: reproducible comparisons against numbagg and NumPy, with development/WSL timings clearly separated from native-hardware calibration.
 
-## Benchmarks
-
-### Upstream-backed verification
-
-The test corpus is vendored byte-for-byte from
-[numbagg/numbagg@c73d4661b66cbfdee69e2834adb7f08d0d12af24](https://github.com/numbagg/numbagg/commit/c73d4661b66cbfdee69e2834adb7f08d0d12af24)
-under `tests/vendor/numbagg`, with the upstream licenses and SHA-256 provenance.
-`python scripts/vendor_numbagg_tests.py` refreshes the pinned snapshot;
-`python scripts/vendor_numbagg_tests.py --check` verifies it offline.
-
-Parity tests use the complete upstream array corpus, including million-element
-cases, and execute the upstream allnan/anynan edge-case class unchanged through
-differential wrappers. Supported operations must match numbagg's values,
-shapes, dtypes and exception types; missing numbagg is an error, not a skip.
-`nanprod` has no standalone numbagg equivalent and is explicitly NumPy-only.
-
-`powershell.exe -NoProfile -ExecutionPolicy Bypass -File scripts/mojagg.ps1 bench-reference --save comparison.json` compares public APIs using
-the same upstream inputs, with correctness checks and JIT warmup before timing.
-Add `--full` for million-element matrices, or `--ops nanmean nansum` to narrow
-the run. Reports include fixture commit, runtime numbagg/NumPy versions, thread
-configuration, individual samples and new/reference time ratios. Smaller ratios
-are faster. Integer `nanprod` uses NumPy's explicit input dtype, matching this
-extension's result-dtype contract.
-
-Development verification (2026-09-06, WSL2, numbagg 0.9.4, 16 Numba threads):
-153 Python tests passed. Both 10K- and 1M-element matrices completed: 208
-numbagg comparisons plus 40 explicitly labeled NumPy-only nanprod comparisons.
-Performance is not uniformly faster: the full matrix included nanmean at
-1.43x and nancount at 1.59x numbagg's time in their slowest cases. These are
-development measurements, not native-Linux dispatch calibration.
-
-> Numbers below are placeholders until the first AWS calibration run (`c7i.8xlarge`, pinned CPU governor). The full matrix — size × cardinality × NaN-density × dtype — is regenerated per release and committed to `benchmarks/results/`.
-
-| Function | numpy | numbagg | mojagg | vs numbagg |
-|---|---|---|---|---|
-| `nansum` (1e7 f64) | 1.0× | 8× | **TBD** | TBD |
-| `group_nansum` (1e7 rows, 1e4 groups) | 1.0× (groupies) | 15× | **TBD** | TBD |
-| `move_mean` (1e7 f64, w=100) | — | 20× | **TBD** | TBD |
-
-Run them: `powershell.exe -NoProfile -ExecutionPolicy Bypass -File scripts/mojagg.ps1 bench-full` · Continuous per-PR performance tracking via [CodSpeed](https://codspeed.io).
-
 ### GUFunc driver
 
 Every operation declares one fixed-arity native tuple of typed `GUTensor`
@@ -92,38 +51,60 @@ rules.
 
 Run `powershell.exe -NoProfile -ExecutionPolicy Bypass -File scripts/mojagg.ps1 test-mojo` for the native tuple and scratch-path smoke tests, and
 `powershell.exe -NoProfile -ExecutionPolicy Bypass -File scripts/mojagg.ps1 test-python` for Python parity against numbagg.
-`benchmarks/reduction_contract.py` times the native boundary with allocations
-and reference calculations excluded:
+
+## Performance measurement
+
+The repository keeps two separate performance paths. The small
+`benchmarks/codspeed/` suite runs on trusted pushes and pull requests through
+[CodSpeed](https://codspeed.io). It covers representative reduction, groupby,
+matrix, rolling, exponential, and fill paths with moderate deterministic
+inputs, so it can detect regressions without running the publication matrix.
+
+The manual comparison in `benchmarks/public_benchmark.py` is intended for an
+occasional AWS run. It compares mojagg with numbagg and available pandas
+adapters, records time and peak Python-tracked allocation, verifies results,
+and writes a self-contained HTML dashboard. The default profile is the larger
+`Public` suite; `Quick` is useful while editing the configuration:
 
 ```powershell
-powershell.exe -NoProfile -ExecutionPolicy Bypass -File scripts/mojagg.ps1 reduction-contract --save before.json
-# Preserve a copy of the built extension before editing, then rebuild.
-powershell.exe -NoProfile -ExecutionPolicy Bypass -File scripts/mojagg.ps1 reduction-contract --baseline-library before.so --save paired.json
+powershell.exe -NoProfile -ExecutionPolicy Bypass -File scripts/mojagg.ps1 bench-public --profile quick --only reduction:nansum,nanmean
 ```
 
-The paired mode alternates old/new libraries on identical inputs, checks equal
-results and reports new/baseline time ratios (below 1 means faster). It covers
-f32/f64/i32/i64, SIMD tails, strided/multi-axis slices, all-NaN scans and early
-or late decisive values. Use `--filter nansum --min-time 0.1` for longer sum
-checks. WSL timings are development comparisons, not native-Linux dispatch
-calibration; no dispatch thresholds are changed by this refactor.
+On the publication host, the same runner is portable:
 
-Development comparison (2026-09-06, WSL2 x86_64, Mojo 1.0.0): nine alternating
-old/new samples per case. Longer sum runs used at least 100 ms per sample.
-These are time ratios against the pre-refactor working-tree extension, not
-speedups against NumPy/numbagg:
+```bash
+python benchmarks/public_benchmark.py --profile public --output docs/benchmarks/latest/index.html
+```
 
-| Workload | New / baseline time |
-|---|---|
-| Sum, 28 dtype/layout/size cases | 0.884–1.049 |
-| Float allnan, first value decisive, contiguous | 0.117–0.199 |
-| Float allnan, first block decisive in every MULTI slice | 0.104–0.143 |
-| Float allnan, first value decisive in every strided MULTI slice | 0.039–0.045 |
-| Integer allnan, MULTI layouts | 0.235–0.391 |
+For a programmatic run, instantiate `Public`, `Quick`, or `Stress` and mutate
+their public case lists and function lists. Each `ReductionTest`,
+`GroupByTest`, `MatrixTest`, `RollingTest`, `ExponentialTest`, and `FillTest`
+owns its shape, dtype, axes, NaN settings, and family-specific parameters.
+Missing or semantically unsupported adapters are shown as `N/A` in the report.
 
-All measured sum cases stayed within a 5% regression tolerance; the float32
-MULTI case improved by about 12%. Recheck on native Linux before treating
-these development timings as portable performance claims.
+The default output is `docs/benchmarks/latest/index.html` with a companion
+`results.json`. Once a manual run is complete, commit or upload those files to
+that directory. A later static documentation site can embed the report from
+`latest/index.html` without rerunning the expensive benchmark in CI.
+
+## Maintenance automation
+
+The repository has scheduled maintenance workflows for moving toolchains and
+support policies:
+
+- [`mojo-watch.yml`](.github/workflows/mojo-watch.yml) detects new Modular
+  MAX releases, validates a toolchain update, and opens a draft PR with
+  release-note signals for possible GUFunc and kernel refactors.
+- [`python-support-watch.yml`](.github/workflows/python-support-watch.yml)
+  detects stable CPython releases and NumPy's minimum Python requirement, then
+  opens a draft PR that keeps Pixi, CI, release metadata, and the lockfile in
+  sync.
+- [`pr-review.yml`](.github/workflows/pr-review.yml) reviews pull request
+  diffs for missing parity tests, benchmark evidence, stale lockfiles, hidden
+  copies or casts, and unsafe workflow changes. It does not execute code from
+  fork pull requests.
+
+Dependabot continues to maintain Python dependencies and GitHub Actions.
 
 ## Install
 
@@ -131,7 +112,7 @@ these development timings as portable performance claims.
 pip install mojagg
 ```
 
-Prebuilt wheels for Linux x86_64/aarch64 and macOS arm64. Python ≥ 3.11, NumPy ≥ 2.0. No Mojo toolchain needed — kernels ship compiled.
+Prebuilt wheels for Linux x86_64/aarch64 and macOS arm64. Python ≥ 3.10, NumPy ≥ 2.0. No Mojo toolchain needed — kernels ship compiled.
 
 ## Functions
 

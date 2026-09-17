@@ -1,0 +1,136 @@
+name: Automated pull request review
+
+# This workflow reads PR metadata and patches through the GitHub API. It does
+# not check out or execute code from the pull request, which keeps fork PRs
+# safe while still allowing the bot to comment with project-specific findings.
+
+on:
+  pull_request_target:
+    types: [opened, synchronize, reopened, ready_for_review]
+
+permissions:
+  contents: read
+  issues: write
+  pull-requests: write
+
+jobs:
+  review:
+    runs-on: ubuntu-latest
+    steps:
+      - name: Review the pull request diff
+        uses: actions/github-script@v9
+        with:
+          script: |
+            const marker = "<!-- mojagg-automated-review -->";
+            const { owner, repo } = context.repo;
+            const pullNumber = context.payload.pull_request.number;
+            const files = await github.paginate(github.rest.pulls.listFiles, {
+              owner,
+              repo,
+              pull_number: pullNumber,
+              per_page: 100,
+            });
+            const names = files.map((file) => file.filename);
+            const has = (pattern) => names.some((name) => pattern.test(name));
+            const patchFor = (file) => file.patch || "";
+            const findings = [];
+            const suggestions = [];
+
+            const sourceChanges = has(/^(python|src)\//);
+            const testChanges = has(/^(tests|benchmarks)\//);
+            const mojoChanges = has(/\.mojo$/);
+            const mojoTestChanges = has(/^tests\/mojo\//);
+            const driverChanges = has(/^src\/mojagg\/drivers\//);
+            const benchmarkChanges = has(/^benchmarks\//);
+
+            if (sourceChanges && !testChanges) {
+              findings.push(
+                "Source changes do not include a test or benchmark change. Add parity coverage or explain why existing coverage is sufficient.",
+              );
+            }
+            if (mojoChanges && !mojoTestChanges) {
+              findings.push(
+                "Mojo changes do not include a Mojo test change. Exercise the changed driver or kernel through `tests/mojo/`.",
+              );
+            }
+            if (driverChanges && !benchmarkChanges) {
+              findings.push(
+                "Driver changes do not include benchmark evidence. Dispatch and performance-sensitive changes should include a representative CodSpeed or public benchmark update.",
+              );
+            }
+
+            if (has(/^pixi\.toml$/) && !has(/^pixi\.lock$/)) {
+              findings.push("`pixi.toml` changed without `pixi.lock`; regenerate and commit the locked environment.");
+            }
+            if (has(/^pyproject\.toml$/) && has(/^python\/|^src\//) && !testChanges) {
+              suggestions.push("Package or facade changes should include parity tests under `tests/python/`.");
+            }
+            if (has(/^\.github\/workflows\/(ci|release)\.yml$/) && !has(/^pixi\.toml$/)) {
+              suggestions.push("CI or release Python matrix changes should be synchronized with the Pixi environments and package classifiers.");
+            }
+
+            for (const file of files) {
+              const patch = patchFor(file);
+              if (!patch) {
+                continue;
+              }
+              if (/\.mojo$/.test(file.filename) && /\bprint\s*\(/.test(patch)) {
+                findings.push("`" + file.filename + "` adds a print in Mojo; remove debugging output before merging.");
+              }
+              if (/^src\//.test(file.filename) && /\b(?:copy|astype)\s*\(/.test(patch)) {
+                suggestions.push("Review `" + file.filename + "` for hidden copies or casts; the project requires zero-copy inputs and explicit dtype handling.");
+              }
+              if (/\b(?:TODO|FIXME)\b/.test(patch)) {
+                suggestions.push("`" + file.filename + "` adds a TODO/FIXME; link it to an issue or resolve it before merging.");
+              }
+              if (/\.github\/workflows\//.test(file.filename) && /pull_request_target/.test(patch) && /actions\/checkout/.test(patch)) {
+                findings.push("`" + file.filename + "` combines `pull_request_target` with checkout; review the workflow for execution of untrusted fork code.");
+              }
+            }
+
+            const unique = (items) => [...new Set(items)];
+            const uniqueFindings = unique(findings);
+            const uniqueSuggestions = unique(suggestions);
+            const lines = [
+              marker,
+              "## Automated mojagg review",
+              "",
+              "This review inspects the pull request diff through the GitHub API and does not execute pull request code. CI remains the source of truth for compilation, parity, and benchmark results.",
+              "",
+            ];
+
+            if (uniqueFindings.length) {
+              lines.push("### Findings", "", ...uniqueFindings.map((item) => `- ${item}`), "");
+            } else {
+              lines.push("No high-confidence project-specific findings were detected.", "");
+            }
+            if (uniqueSuggestions.length) {
+              lines.push("### Suggestions", "", ...uniqueSuggestions.map((item) => `- ${item}`), "");
+            }
+            lines.push("Generated by `.github/workflows/pr-review.yml`.");
+            const body = lines.join("\n");
+
+            const comments = await github.paginate(github.rest.issues.listComments, {
+              owner,
+              repo,
+              issue_number: pullNumber,
+              per_page: 100,
+            });
+            const previous = comments.find(
+              (comment) => comment.user && comment.user.type === "Bot" && comment.body && comment.body.includes(marker),
+            );
+            if (previous) {
+              await github.rest.issues.updateComment({
+                owner,
+                repo,
+                comment_id: previous.id,
+                body,
+              });
+            } else {
+              await github.rest.issues.createComment({
+                owner,
+                repo,
+                issue_number: pullNumber,
+                body,
+              });
+            }

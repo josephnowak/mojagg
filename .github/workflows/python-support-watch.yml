@@ -1,0 +1,195 @@
+name: Python support watch
+
+# Keep the supported Python policy current with CPython and NumPy releases.
+# The workflow opens a draft PR only after the affected Pixi environments
+# resolve and their tests pass.
+
+on:
+  schedule:
+    - cron: "30 8 * * 1"
+  workflow_dispatch: {}
+
+permissions:
+  contents: write
+  issues: write
+  pull-requests: write
+
+jobs:
+  check:
+    runs-on: ubuntu-latest
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v7
+
+      - name: Detect Python and NumPy support changes
+        id: detect
+        uses: actions/github-script@v9
+        with:
+          script: |
+            const fs = require("fs");
+
+            function cycleTuple(cycle) {
+              return cycle.split(".").map(Number);
+            }
+
+            function compareCycles(left, right) {
+              const a = cycleTuple(left);
+              const b = cycleTuple(right);
+              return (a[0] - b[0]) || (a[1] - b[1]);
+            }
+
+            function currentCycles() {
+              const pixi = fs.readFileSync("pixi.toml", "utf8");
+              return [...pixi.matchAll(/^\[feature\.py(\d)(\d+)\.dependencies\]$/gm)]
+                .map((match) => `${match[1]}.${match[2]}`)
+                .sort(compareCycles);
+            }
+
+            const supported = currentCycles();
+            const releases = await github.paginate(github.rest.repos.listReleases, {
+              owner: "python",
+              repo: "cpython",
+              per_page: 100,
+            });
+            const stableCycles = [...new Set(
+              releases
+                .filter((release) => !release.draft && !release.prerelease)
+                .map((release) => {
+                  const match = release.tag_name.match(/^v(3\.\d+)\.\d+$/);
+                  return match ? match[1] : null;
+                })
+                .filter(Boolean),
+            )].sort(compareCycles);
+            const latestStable = stableCycles.at(-1);
+            if (!latestStable) {
+              core.setFailed("Could not find a stable CPython release");
+              return;
+            }
+
+            const highestSupported = supported.at(-1);
+            const additions = stableCycles.filter(
+              (cycle) => compareCycles(cycle, highestSupported) > 0,
+            );
+
+            const numpyResponse = await fetch("https://pypi.org/pypi/numpy/json");
+            if (!numpyResponse.ok) {
+              core.setFailed(`PyPI returned ${numpyResponse.status} for NumPy metadata`);
+              return;
+            }
+            const numpy = await numpyResponse.json();
+            const numpyRequirement = numpy.info.requires_python || "unknown";
+            const minimumMatch = numpyRequirement.match(/>=\s*(\d+\.\d+)/);
+            const numpyMinimum = minimumMatch ? minimumMatch[1] : null;
+            const removals = numpyMinimum
+              ? supported.filter((cycle) => compareCycles(cycle, numpyMinimum) < 0)
+              : [];
+
+            const actions = [
+              ...additions.map((version) => ({
+                type: "add",
+                version,
+                reason: `CPython ${version} is stable`,
+              })),
+              ...removals.map((version) => ({
+                type: "remove",
+                version,
+                reason: `latest NumPy ${numpy.info.version} requires Python ${numpyMinimum}+`,
+              })),
+            ];
+
+            core.setOutput("actions", JSON.stringify(actions));
+            core.setOutput("hasChanges", actions.length ? "true" : "false");
+            core.setOutput("latestStable", latestStable);
+            core.setOutput("numpyVersion", numpy.info.version);
+            core.setOutput("numpyRequirement", numpyRequirement);
+            core.setOutput("supported", supported.join(", "));
+
+      - name: Set up Pixi
+        if: steps.detect.outputs.hasChanges == 'true'
+        uses: prefix-dev/setup-pixi@v0.10.2
+        with:
+          cache: true
+
+      - name: Update Python support metadata
+        if: steps.detect.outputs.hasChanges == 'true'
+        env:
+          SUPPORT_ACTIONS: ${{ steps.detect.outputs.actions }}
+        run: pixi run python scripts/update_python_support.py --actions "$SUPPORT_ACTIONS"
+
+      - name: Resolve and test affected environments
+        if: steps.detect.outputs.hasChanges == 'true'
+        env:
+          SUPPORT_ACTIONS: ${{ steps.detect.outputs.actions }}
+        run: |
+          set -euo pipefail
+          pixi install
+          pixi run lint
+          pixi run test-mojo
+          while IFS= read -r environment; do
+            [ -n "$environment" ] || continue
+            pixi run -e "$environment" build-ext
+            pixi run -e "$environment" test
+          done < <(printf '%s' "$SUPPORT_ACTIONS" | jq -r '.[] | select(.type == "add") | "py" + (.version | gsub("\\."; ""))')
+          pixi run build-ext
+          pixi run test
+
+      - name: Open draft Python support PR
+        if: steps.detect.outputs.hasChanges == 'true'
+        uses: peter-evans/create-pull-request@v7
+        with:
+          token: ${{ secrets.GITHUB_TOKEN }}
+          branch: automation/python-support
+          delete-branch: true
+          draft: true
+          commit-message: "chore: update supported Python versions"
+          title: "chore: update supported Python versions"
+          labels: dependencies,python
+          body: |
+            This draft PR updates the supported Python policy from the scheduled CPython/NumPy watcher.
+
+            - Latest stable CPython detected: `${{ steps.detect.outputs.latestStable }}`
+            - Latest NumPy: `${{ steps.detect.outputs.numpyVersion }}`
+            - NumPy requirement: `${{ steps.detect.outputs.numpyRequirement }}`
+            - Previous supported cycles: `${{ steps.detect.outputs.supported }}`
+            - Actions: `${{ steps.detect.outputs.actions }}`
+
+            The PR updates Pixi environments, CI and release matrices, package metadata, documentation, and the lockfile. The review bot will check that these files remain synchronized.
+
+            Review checklist:
+
+            - [ ] Confirm the CPython release is stable and available in the Pixi channels.
+            - [ ] Confirm the NumPy support policy and dependency resolution for each remaining Python version.
+            - [ ] Review parity results and wheel builds across the full matrix.
+
+      - name: Open issue when the support update cannot pass
+        if: failure() && steps.detect.outputs.hasChanges == 'true'
+        uses: actions/github-script@v9
+        env:
+          ACTIONS_JSON: ${{ steps.detect.outputs.actions }}
+          NUMPY_VERSION: ${{ steps.detect.outputs.numpyVersion }}
+        with:
+          script: |
+            const actions = process.env.ACTIONS_JSON;
+            const title = "Python support update needs review";
+            const existing = await github.paginate(github.rest.issues.listForRepo, {
+              owner: context.repo.owner,
+              repo: context.repo.repo,
+              state: "open",
+              labels: "python",
+              per_page: 100,
+            });
+            if (existing.some((issue) => issue.title === title)) {
+              return;
+            }
+            await github.rest.issues.create({
+              owner: context.repo.owner,
+              repo: context.repo.repo,
+              title,
+              labels: ["dependencies", "python"],
+              body: [
+                `The Python support watcher proposed: ${actions}`,
+                `Latest NumPy metadata: ${process.env.NUMPY_VERSION}`,
+                "",
+                "The generated update did not pass Pixi resolution or validation. Inspect the workflow logs before changing the support matrix manually.",
+              ].join("\n"),
+            });

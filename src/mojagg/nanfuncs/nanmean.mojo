@@ -5,7 +5,7 @@ from std.collections import Span
 from std.math import isnan
 from std.sys.info import simd_width_of
 
-from mojagg.core.numeric import nan_or_zero
+from mojagg.core.numeric import load_block_or_identity, nan_or_zero
 from mojagg.drivers.guvectorize import (
     CoreSpec,
     Dim,
@@ -34,19 +34,13 @@ def nan_mean_contiguous[
     def step[
         vector_width: Int
     ](i: Int, evl: Int) {imm pointer, mut total, mut count, imm zero, imm one}:
-        if evl == width:
-            var block = pointer.unsafe_load[width=width](i)
-            var widened = block.cast[DType.float64]()
-            var missing = isnan(block)
-            total += missing.select(zero, widened)
-            count += missing.select(zero, one)
-        else:
-            comptime for lane in range(width):
-                if lane < evl:
-                    var value = pointer[unsafe_offset=i + lane]
-                    if not isnan(value):
-                        total[lane] += Float64(value)
-                        count[lane] += 1.0
+        var block = load_block_or_identity[dtype, width](
+            pointer, i, evl, nan_or_zero[dtype]()
+        )
+        var widened = block.cast[DType.float64]()
+        var missing = isnan(block)
+        total += missing.select(zero, widened)
+        count += missing.select(zero, one)
 
     vectorize[width](len(values), step)
     return (Float64(total.reduce_add()), Int64(count.reduce_add()))
