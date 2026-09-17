@@ -40,12 +40,10 @@ struct GroupNanAnyAll[
         comptime if Self.value_t.is_floating_point():
             if isnan(value):
                 return
-        comptime if Self.is_all:
-            if not value:
-                destination[unsafe_offset=label] = 0
-        else:
-            if value:
-                destination[unsafe_offset=label] = 1
+        # `all` clears the group on a falsy lane, `any` sets it on a truthy one.
+        comptime resolved = Scalar[Self.value_t](0 if Self.is_all else 1)
+        if Bool(value) != Self.is_all:
+            destination[unsafe_offset=label] = resolved
 
     @always_inline
     def __call__(mut self, tensors: Self.Signature):
@@ -54,7 +52,7 @@ struct GroupNanAnyAll[
         var labels = label_input.read_span()
         var destination = output.write_span()
 
-        comptime width = simd_width_of[Self.value_t]() * 8
+        comptime width = simd_width_of[Self.value_t]() * 4
         var value_ptr = values.unsafe_ptr()
         var label_ptr = labels.unsafe_ptr()
         var destination_ptr = destination.unsafe_ptr()

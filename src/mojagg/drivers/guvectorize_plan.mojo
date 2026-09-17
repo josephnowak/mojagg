@@ -117,6 +117,11 @@ struct GUVectorizePlan[NUM_TENSORS: Int](Copyable):
         if Args[index].is_output:
             core_rank = output_axes.count
             axes = output_axes.values.copy()
+        elif Args[index].core_spec.rank == 0:
+            # A scalar read operand has no selected core axes.  Its outer
+            # shape participates in normal gufunc broadcasting while the
+            # operation receives a one-element span for the scalar value.
+            core_rank = 0
         if core_rank < 0 or core_rank > rank:
             raise Error("invalid core rank")
         if not Args[index].is_output and not tensor.bound:
@@ -354,7 +359,11 @@ def _build_signature_plan[
     comptime for i in range(len(Args)):
         comptime if not Args[i].is_output:
             var logical_core_shape = DimArray(fill=1)
-            if Args[i].core_spec.rank == input_axes.count:
+            if Args[i].core_spec.rank == 0:
+                # Scalar inputs have no symbolic core dimensions.  Their
+                # scalar core is broadcast through the outer domain below.
+                pass
+            elif Args[i].core_spec.rank == input_axes.count:
                 for core_axis in range(input_axes.count):
                     logical_core_shape[core_axis] = plans[i].core_shape[
                         core_axis

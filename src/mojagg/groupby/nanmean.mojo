@@ -55,7 +55,7 @@ struct GroupNanMean[
         var destination = output.write_span()
         var counts = counts_output.write_span()
 
-        comptime width = simd_width_of[Self.value_t]() * 8
+        comptime width = simd_width_of[Self.value_t]() * 4
         var value_ptr = values.unsafe_ptr()
         var label_ptr = labels.unsafe_ptr()
         var destination_ptr = destination.unsafe_ptr()

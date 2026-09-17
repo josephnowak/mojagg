@@ -14,7 +14,7 @@ from mojagg.drivers.guvectorize import (
 
 @always_inline
 def _move_exp_nancorr[
-    dtype: DType
+    dtype: DType, scalar_alpha: Bool
 ](
     values_a: Span[Scalar[dtype], ImmUntrackedOrigin],
     values_b: Span[Scalar[dtype], ImmUntrackedOrigin],
@@ -34,18 +34,29 @@ def _move_exp_nancorr[
     var values_b_ptr = values_b.unsafe_ptr()
     var alphas_ptr = alphas.unsafe_ptr()
     var destination_ptr = destination.unsafe_ptr()
+    var scalar_alpha_value = Float64(0.0)
+    var scalar_decay = Float64(0.0)
+    comptime if scalar_alpha:
+        scalar_alpha_value = Float64(alphas_ptr[unsafe_offset=0])
+        scalar_decay = 1.0 - scalar_alpha_value
+    var scalar_decay_squared = scalar_decay * scalar_decay
 
     for i in range(len(values_a)):
         var value_a = values_a_ptr[unsafe_offset=i]
         var value_b = values_b_ptr[unsafe_offset=i]
-        var alpha = Float64(alphas_ptr[unsafe_offset=i])
-        var decay = 1.0 - alpha
+        var alpha = scalar_alpha_value
+        var decay = scalar_decay
+        var decay_squared = scalar_decay_squared
+        comptime if not scalar_alpha:
+            alpha = Float64(alphas_ptr[unsafe_offset=i])
+            decay = 1.0 - alpha
+            decay_squared = decay * decay
 
         sum_x1 *= decay
         sum_x2 *= decay
         sum_x1x2 *= decay
         sum_weight *= decay
-        sum_weight_2 *= decay * decay
+        sum_weight_2 *= decay_squared
         weight *= decay
         sum_x1_2 *= decay
         sum_x2_2 *= decay
@@ -60,23 +71,19 @@ def _move_exp_nancorr[
             sum_x1_2 += Float64(value_a * value_a)
             sum_x2_2 += Float64(value_b * value_b)
 
-        if sum_weight != 0.0:
-            var cov = sum_x1x2 - sum_x1 * sum_x2 / sum_weight
-            var var_a = sum_x1_2 - sum_x1 * sum_x1 / sum_weight
-            var var_b = sum_x2_2 - sum_x2 * sum_x2 / sum_weight
+        # Gate on the cheap conditions before the four divisions and the
+        # square root: below the weight threshold they would be discarded.
+        var output = nan_or_zero[dtype]()
+        if weight >= min_weight and sum_weight != 0.0:
             var bias = 1.0 - sum_weight_2 / (sum_weight * sum_weight)
-            if weight >= min_weight and bias > 0.0:
+            if bias > 0.0:
+                var cov = sum_x1x2 - sum_x1 * sum_x2 / sum_weight
+                var var_a = sum_x1_2 - sum_x1 * sum_x1 / sum_weight
+                var var_b = sum_x2_2 - sum_x2 * sum_x2 / sum_weight
                 var denominator = sqrt(var_a * var_b)
                 if denominator > 0.0:
-                    destination_ptr[unsafe_offset=i] = (cov / denominator).cast[
-                        dtype
-                    ]()
-                else:
-                    destination_ptr[unsafe_offset=i] = nan_or_zero[dtype]()
-            else:
-                destination_ptr[unsafe_offset=i] = nan_or_zero[dtype]()
-        else:
-            destination_ptr[unsafe_offset=i] = nan_or_zero[dtype]()
+                    output = (cov / denominator).cast[dtype]()
+        destination_ptr[unsafe_offset=i] = output
 
 
 struct MoveExpNanCorrKernel[dtype: DType](GUFuncKernel, ImplicitlyCopyable):
@@ -97,7 +104,36 @@ struct MoveExpNanCorrKernel[dtype: DType](GUFuncKernel, ImplicitlyCopyable):
     @always_inline
     def __call__(mut self, tensors: Self.Signature):
         var input_a, input_b, alpha, output = tensors
-        _move_exp_nancorr[Self.dtype](
+        _move_exp_nancorr[Self.dtype, False](
+            input_a.read_span(),
+            input_b.read_span(),
+            alpha.read_span(),
+            output.write_span(),
+            self.min_weight,
+        )
+
+
+struct MoveExpNanCorrScalarKernel[dtype: DType](
+    GUFuncKernel, ImplicitlyCopyable
+):
+    """``(n), (n), () -> (n)`` moving correlation for scalar alpha."""
+
+    comptime Signature = Tuple[
+        GUTensor[Self.dtype, False, CoreSpec[Dim[0]]],
+        GUTensor[Self.dtype, False, CoreSpec[Dim[0]]],
+        GUTensor[Self.dtype, False, CoreSpec[]],
+        GUTensor[Self.dtype, True, CoreSpec[Dim[0]]],
+    ]
+
+    var min_weight: Float64
+
+    def __init__(out self, min_weight: Float64):
+        self.min_weight = min_weight
+
+    @always_inline
+    def __call__(mut self, tensors: Self.Signature):
+        var input_a, input_b, alpha, output = tensors
+        _move_exp_nancorr[Self.dtype, True](
             input_a.read_span(),
             input_b.read_span(),
             alpha.read_span(),

@@ -52,6 +52,10 @@ Commands:
   bench-codspeed
                 Build the extension and run the lightweight CodSpeed suite.
   bench-public  Build the extension and run the manual HTML comparison.
+  bench-parallel-threshold
+                Run the standalone Mojo serial/parallel threshold benchmark.
+  bench-quantile-select
+                Run the standalone Mojo sort vs multi-select quantile benchmark.
   clean-native  Remove generated native binaries under python/mojagg only.
 
 Examples:
@@ -80,6 +84,8 @@ $aliases = @{
     "format" = "format"
     "bench-codspeed" = "bench-codspeed"
     "bench-public" = "bench-public"
+    "bench-parallel-threshold" = "bench-parallel-threshold"
+    "bench-quantile-select" = "bench-quantile-select"
     "clean-native" = "clean-native"
 }
 
@@ -320,6 +326,24 @@ ensure_pixi
 "\$PIXI" install --locked
 run_pixi build-ext
 PYTHONPATH=python run_pixi python benchmarks/public_benchmark.py "\$@"
+'@
+        break
+    }
+    "bench-parallel-threshold" {
+        @'
+ensure_pixi
+"\$PIXI" install --locked
+run_pixi mojo run benchmarks/parallel_threshold.mojo "\$@"
+'@
+        break
+    }
+    "bench-quantile-select" {
+        @'
+ensure_pixi
+"\$PIXI" install --locked
+mkdir -p .tmp
+run_pixi mojo build -O3 --mcpu x86-64-v3 -o .tmp/quantile_select benchmarks/quantile_select.mojo
+.tmp/quantile_select "\$@"
 '@
         break
     }

@@ -20,6 +20,11 @@ def test_group_nansum(benchmark, hot_path_inputs):
     benchmark(mojagg.group_nansum, values, labels, axis=1, num_labels=256)
 
 
+def test_nanquantile(benchmark, hot_path_inputs):
+    values = hot_path_inputs["values"]
+    benchmark(mojagg.nanquantile, values, [0.25, 0.5, 0.75], axis=1)
+
+
 def test_nancorrmatrix(benchmark, hot_path_inputs):
     values = hot_path_inputs["matrix"]
     benchmark(mojagg.nancorrmatrix, values, axis=(0, 1))

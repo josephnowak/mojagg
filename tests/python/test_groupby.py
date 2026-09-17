@@ -421,6 +421,27 @@ def test_group_extrema_ties_and_all_nan_parity(function_name):
     np.testing.assert_allclose(actual, expected, equal_nan=True)
 
 
+@pytest.mark.parametrize("function_name", ["group_nanargmin", "group_nanargmax"])
+@pytest.mark.parametrize("dtype", [np.float32, np.float64])
+def test_group_arg_extrema_nan_and_infinity_parity(function_name, dtype):
+    values = np.array(
+        [np.nan, np.inf, -np.inf, np.inf, -np.inf, 3.0, np.nan],
+        dtype=dtype,
+    )
+    labels = np.array([0, 0, 0, 1, 1, 1, 2], dtype=np.int32)
+
+    actual = getattr(mojagg, function_name)(values, labels, num_labels=3)
+    expected = _numbagg_group_result(
+        function_name,
+        values,
+        labels,
+        num_labels=3,
+    )
+
+    assert actual.dtype == expected.dtype
+    np.testing.assert_allclose(actual, expected, equal_nan=True)
+
+
 @pytest.mark.parametrize("function_name", ["group_nanfirst", "group_nanlast"])
 def test_group_first_last_skip_nan_and_negative_labels(function_name):
     values = np.array([np.nan, 4.0, 2.0, np.nan, 7.0])

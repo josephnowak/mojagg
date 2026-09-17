@@ -9,7 +9,11 @@ from std.os import abort
 from std.python import PythonObject
 from std.python.bindings import PythonModuleBuilder
 
-from mojagg.core.numeric import nan_or_zero
+from mojagg.core.numeric import (
+    nan_or_zero,
+    neg_inf_or_min,
+    pos_inf_or_max,
+)
 from mojagg.drivers.guvectorize import (
     AnyGUTensor,
     AxisSpec,
@@ -31,6 +35,9 @@ from mojagg.groupby.nanprod import GroupNanProd
 from mojagg.groupby.nansum import GroupNanSum
 from mojagg.groupby.nanvarstd import GroupNanVarStd
 from mojagg.groupby.group_kernel import (
+    GROUP_INIT_NAN_OR_NEG_INF,
+    GROUP_INIT_NAN_OR_NEG_ONE,
+    GROUP_INIT_NAN_OR_POS_INF,
     GROUP_INIT_NAN_OR_ZERO,
     GROUP_INIT_ONE,
     GROUP_INIT_ZERO,
@@ -70,6 +77,32 @@ def _fill_nan[
         values[i] = nan_value
 
 
+def _fill_pos_inf_or_max[
+    dtype: DType, core: CoreSpecProtocol
+](mut output: GUTensor[dtype, True, core],):
+    var values = output.write_span()
+    var identity = pos_inf_or_max[dtype]()
+    for i in range(len(values)):
+        values[i] = identity
+
+
+def _fill_neg_inf_or_min[
+    dtype: DType, core: CoreSpecProtocol
+](mut output: GUTensor[dtype, True, core],):
+    var values = output.write_span()
+    var identity = neg_inf_or_min[dtype]()
+    for i in range(len(values)):
+        values[i] = identity
+
+
+def _fill_neg_one[
+    dtype: DType, core: CoreSpecProtocol
+](mut output: GUTensor[dtype, True, core],):
+    var values = output.write_span()
+    for i in range(len(values)):
+        values[i] = Scalar[dtype](-1)
+
+
 def _initialize_output[
     dtype: DType,
     core: CoreSpecProtocol,
@@ -83,6 +116,21 @@ def _initialize_output[
             _fill_nan[dtype, core](output)
         else:
             _fill_zero[dtype, core](output)
+    elif init_kind == GROUP_INIT_NAN_OR_POS_INF:
+        comptime if dtype.is_floating_point():
+            _fill_nan[dtype, core](output)
+        else:
+            _fill_pos_inf_or_max[dtype, core](output)
+    elif init_kind == GROUP_INIT_NAN_OR_NEG_INF:
+        comptime if dtype.is_floating_point():
+            _fill_nan[dtype, core](output)
+        else:
+            _fill_neg_inf_or_min[dtype, core](output)
+    elif init_kind == GROUP_INIT_NAN_OR_NEG_ONE:
+        comptime if dtype.is_floating_point():
+            _fill_nan[dtype, core](output)
+        else:
+            _fill_neg_one[dtype, core](output)
     else:
         _fill_zero[dtype, core](output)
 
@@ -235,6 +283,53 @@ def _apply_group_two[
         labels_tensor,
         GUTensor[value_dtype, True, CoreSpec[Dim[1]]].empty(),
         GUTensor[DType.int64, True, CoreSpec[Dim[1]]].empty(),
+    )
+    return _execute_group[Op](
+        values,
+        labels,
+        axes,
+        num_labels,
+        options,
+        signature,
+        initializers,
+        operation,
+        op_name,
+    )
+
+
+def _apply_group_two_value[
+    value_dtype: DType,
+    label_dtype: DType,
+    Op: GroupKernel,
+](
+    values: PythonObject,
+    labels: PythonObject,
+    axes: PythonObject,
+    num_labels: PythonObject,
+    options: PythonObject,
+    operation: Op,
+    op_name: String,
+    initializers: List[Int],
+) raises -> PythonObject:
+    """Build and execute a grouped signature with two value workspaces."""
+
+    validate_dtype[value_dtype](values, op_name)
+    validate_dtype[label_dtype](labels, op_name + " labels")
+    var values_tensor = borrow_numpy_tensor[
+        value_dtype,
+        False,
+        CoreSpec[Dim[0]],
+    ](values)
+    var labels_tensor = borrow_numpy_tensor[
+        label_dtype,
+        False,
+        CoreSpec[Dim[0]],
+    ](labels)
+    var signature = Tuple(
+        values_tensor,
+        labels_tensor,
+        GUTensor[value_dtype, True, CoreSpec[Dim[1]]].empty(),
+        GUTensor[value_dtype, True, CoreSpec[Dim[1]]].empty(),
     )
     return _execute_group[Op](
         values,
@@ -406,7 +501,7 @@ def group_nanmin_binding[
     num_labels: PythonObject,
     options: PythonObject,
 ) raises -> PythonObject:
-    return _apply_group_two[
+    return _apply_group_one[
         value_dtype,
         label_dtype,
         GroupNanMinMax[value_dtype, label_dtype, False],
@@ -418,7 +513,7 @@ def group_nanmin_binding[
         options,
         GroupNanMinMax[value_dtype, label_dtype, False](),
         "group_nanmin",
-        [GROUP_INIT_NAN_OR_ZERO, GROUP_INIT_ZERO],
+        [GROUP_INIT_NAN_OR_POS_INF],
     )
 
 
@@ -431,7 +526,7 @@ def group_nanmax_binding[
     num_labels: PythonObject,
     options: PythonObject,
 ) raises -> PythonObject:
-    return _apply_group_two[
+    return _apply_group_one[
         value_dtype,
         label_dtype,
         GroupNanMinMax[value_dtype, label_dtype, True],
@@ -443,7 +538,7 @@ def group_nanmax_binding[
         options,
         GroupNanMinMax[value_dtype, label_dtype, True](),
         "group_nanmax",
-        [GROUP_INIT_NAN_OR_ZERO, GROUP_INIT_ZERO],
+        [GROUP_INIT_NAN_OR_NEG_INF],
     )
 
 
@@ -456,7 +551,7 @@ def group_nanargmin_binding[
     num_labels: PythonObject,
     options: PythonObject,
 ) raises -> PythonObject:
-    return _apply_group_three[
+    return _apply_group_two_value[
         value_dtype,
         label_dtype,
         GroupNanArgMinMax[value_dtype, label_dtype, False],
@@ -468,7 +563,7 @@ def group_nanargmin_binding[
         options,
         GroupNanArgMinMax[value_dtype, label_dtype, False](),
         "group_nanargmin",
-        [GROUP_INIT_NAN_OR_ZERO, GROUP_INIT_NAN_OR_ZERO, GROUP_INIT_ZERO],
+        [GROUP_INIT_NAN_OR_NEG_ONE, GROUP_INIT_NAN_OR_ZERO],
     )
 
 
@@ -481,7 +576,7 @@ def group_nanargmax_binding[
     num_labels: PythonObject,
     options: PythonObject,
 ) raises -> PythonObject:
-    return _apply_group_three[
+    return _apply_group_two_value[
         value_dtype,
         label_dtype,
         GroupNanArgMinMax[value_dtype, label_dtype, True],
@@ -493,7 +588,7 @@ def group_nanargmax_binding[
         options,
         GroupNanArgMinMax[value_dtype, label_dtype, True](),
         "group_nanargmax",
-        [GROUP_INIT_NAN_OR_ZERO, GROUP_INIT_NAN_OR_ZERO, GROUP_INIT_ZERO],
+        [GROUP_INIT_NAN_OR_NEG_ONE, GROUP_INIT_NAN_OR_ZERO],
     )
 
 
@@ -531,7 +626,7 @@ def group_nanlast_binding[
     num_labels: PythonObject,
     options: PythonObject,
 ) raises -> PythonObject:
-    return _apply_group_two[
+    return _apply_group_one[
         value_dtype,
         label_dtype,
         GroupNanLast[value_dtype, label_dtype],
@@ -543,7 +638,7 @@ def group_nanlast_binding[
         options,
         GroupNanLast[value_dtype, label_dtype](),
         "group_nanlast",
-        [GROUP_INIT_NAN_OR_ZERO, GROUP_INIT_ZERO],
+        [GROUP_INIT_NAN_OR_ZERO],
     )
 
 

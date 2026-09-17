@@ -89,7 +89,11 @@ def _prepare_alpha(
         ) from None
 
     if alpha_arr.ndim == 0:
-        return np.broadcast_to(alpha_arr, shape)
+        # Keep scalar alpha scalar.  The native binding has a dedicated
+        # scalar-core signature, so a broadcast view does not have to be
+        # materialized into a contiguous worker scratch buffer for every
+        # outer slice.
+        return alpha_arr
     if alpha_arr.ndim == 1:
         if alpha_arr.shape[0] != shape[axis]:
             raise ValueError(

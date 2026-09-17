@@ -25,14 +25,12 @@ struct GroupNanMinMax[
         GUTensor[Self.value_t, False, CoreSpec[Dim[0]]],
         GUTensor[Self.label_t, False, CoreSpec[Dim[0]]],
         GUTensor[Self.value_t, True, CoreSpec[Dim[1]]],
-        GUTensor[DType.int64, True, CoreSpec[Dim[1]]],
     ]
 
     @always_inline
     @staticmethod
     def _update_lane(
         destination: Pointer[mut=True, Scalar[Self.value_t], _],
-        seen: Pointer[mut=True, Scalar[DType.int64], _],
         label_value: Scalar[Self.label_t],
         value: Scalar[Self.value_t],
     ):
@@ -42,29 +40,29 @@ struct GroupNanMinMax[
         comptime if Self.value_t.is_floating_point():
             if isnan(value):
                 return
-        if seen[unsafe_offset=label] == 0:
+        var should_update = False
+        comptime if Self.value_t.is_floating_point():
+            if isnan(destination[unsafe_offset=label]):
+                should_update = True
+        if not should_update:
+            comptime if Self.is_max:
+                should_update = value > destination[unsafe_offset=label]
+            else:
+                should_update = value < destination[unsafe_offset=label]
+        if should_update:
             destination[unsafe_offset=label] = value
-            seen[unsafe_offset=label] = 1
-        elif Self.is_max:
-            if value > destination[unsafe_offset=label]:
-                destination[unsafe_offset=label] = value
-        else:
-            if value < destination[unsafe_offset=label]:
-                destination[unsafe_offset=label] = value
 
     @always_inline
     def __call__(mut self, tensors: Self.Signature):
-        var value_input, label_input, output, seen_output = tensors
+        var value_input, label_input, output = tensors
         var values = value_input.read_span()
         var labels = label_input.read_span()
         var destination = output.write_span()
-        var seen = seen_output.write_span()
 
-        comptime width = simd_width_of[Self.value_t]() * 8
+        comptime width = simd_width_of[Self.value_t]() * 4
         var value_ptr = values.unsafe_ptr()
         var label_ptr = labels.unsafe_ptr()
         var destination_ptr = destination.unsafe_ptr()
-        var seen_ptr = seen.unsafe_ptr()
 
         def step[
             vector_width: Int
@@ -72,7 +70,6 @@ struct GroupNanMinMax[
             imm value_ptr,
             imm label_ptr,
             imm destination_ptr,
-            imm seen_ptr,
         }:
             var value_block = load_block_or_identity[Self.value_t, width](
                 value_ptr, i, evl, Scalar[Self.value_t](0)
@@ -83,7 +80,6 @@ struct GroupNanMinMax[
             comptime for lane in range(width):
                 Self._update_lane(
                     destination_ptr,
-                    seen_ptr,
                     label_block[lane],
                     value_block[lane],
                 )

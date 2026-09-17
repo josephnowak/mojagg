@@ -12,6 +12,7 @@ choices. A typical custom run looks like this::
     suite = Public()
     suite.reduction_functions = ["nansum", "nanmean"]
     suite.reduction_tests[0].nan_fraction = 0.20
+    suite.reduction_tests[0].implementations = ("mojagg", "numbagg")
     suite.groupby_tests[0].num_groups = 4096
     run_benchmark(suite, "docs/benchmarks/latest/index.html")
 
@@ -32,6 +33,7 @@ import platform
 import socket
 import statistics
 import sys
+import threading
 import time
 import tracemalloc
 from collections.abc import Callable, Iterable, Mapping, Sequence
@@ -42,7 +44,11 @@ from typing import Any
 
 import numpy as np
 
+import mojagg
+
 Axis = int | tuple[int, ...] | None
+IMPLEMENTATION_NAMES = ("mojagg", "numbagg")
+_ONE_GIB_F64_ELEMENTS = (1 << 30) // np.dtype(np.float64).itemsize
 
 REDUCTION_FUNCTIONS = [
     "allnan",
@@ -113,6 +119,7 @@ class ReductionTest:
     seed: int = 0
     ddof: int = 1
     quantiles: tuple[float, ...] = (0.5,)
+    implementations: tuple[str, ...] = IMPLEMENTATION_NAMES
 
 
 @dataclass
@@ -130,6 +137,7 @@ class GroupByTest:
     nan_pattern: str = "random"
     seed: int = 0
     ddof: int = 1
+    implementations: tuple[str, ...] = IMPLEMENTATION_NAMES
 
 
 @dataclass
@@ -143,6 +151,7 @@ class MatrixTest:
     nan_fraction: float = 0.10
     nan_pattern: str = "random"
     seed: int = 0
+    implementations: tuple[str, ...] = IMPLEMENTATION_NAMES
 
 
 @dataclass
@@ -159,6 +168,7 @@ class RollingTest:
     second_nan_fraction: float | None = None
     nan_pattern: str = "random"
     seed: int = 0
+    implementations: tuple[str, ...] = IMPLEMENTATION_NAMES
 
 
 @dataclass
@@ -175,6 +185,7 @@ class ExponentialTest:
     second_nan_fraction: float | None = None
     nan_pattern: str = "random"
     seed: int = 0
+    implementations: tuple[str, ...] = IMPLEMENTATION_NAMES
 
 
 @dataclass
@@ -189,6 +200,7 @@ class FillTest:
     nan_fraction: float = 0.10
     nan_pattern: str = "blocks"
     seed: int = 0
+    implementations: tuple[str, ...] = IMPLEMENTATION_NAMES
 
 
 @dataclass
@@ -218,7 +230,6 @@ class BenchmarkSuite:
     repeats: int = 5
     verify_results: bool = True
     include_numbagg: bool = True
-    include_pandas: bool = True
 
 
 class Quick(BenchmarkSuite):
@@ -295,8 +306,10 @@ class Public(BenchmarkSuite):
     """The default AWS/publication suite.
 
     It covers contiguous and batched inputs, multiple positive axis layouts,
-    several NaN densities, and group cardinality. The sizes are large enough
-    to make fixed overhead visible but remain editable for a different host.
+    several NaN densities, and group cardinality. It includes one GiB float64
+    cases for each operation family; cases are prepared serially to keep the
+    peak working set suitable for a 10 GiB host. Those large cases compare
+    mojagg with numbagg.
     """
 
     def __init__(self, **overrides: Any):
@@ -304,6 +317,14 @@ class Public(BenchmarkSuite):
             "name": "public",
             "reduction_tests": [
                 ReductionTest("1d_clean_f64", (250_000,), axis=0, nan_fraction=0.0, seed=101),
+                ReductionTest(
+                    "32x4m_1gib_clean_f64",
+                    (32, _ONE_GIB_F64_ELEMENTS // 32),
+                    axis=1,
+                    nan_fraction=0.0,
+                    seed=104,
+                    implementations=("mojagg", "numbagg"),
+                ),
                 ReductionTest("2d_nan_f64", (32, 16_384), axis=1, nan_fraction=0.10, seed=102),
                 ReductionTest(
                     "3d_multi_axis_f32",
@@ -324,6 +345,16 @@ class Public(BenchmarkSuite):
                     label_dtype="int32",
                     nan_fraction=0.05,
                     seed=201,
+                ),
+                GroupByTest(
+                    "16x8m_1gib_16k_groups",
+                    (16, _ONE_GIB_F64_ELEMENTS // 16),
+                    axis=1,
+                    num_groups=16_384,
+                    label_dtype="int32",
+                    nan_fraction=0.10,
+                    seed=204,
+                    implementations=("mojagg", "numbagg"),
                 ),
                 GroupByTest(
                     "1d_16k_groups",
@@ -347,6 +378,14 @@ class Public(BenchmarkSuite):
             "matrix_tests": [
                 MatrixTest("32_vars_8k_obs", (32, 8_192), axis=(0, 1), nan_fraction=0.05, seed=301),
                 MatrixTest(
+                    "32_vars_1gib_obs",
+                    (32, _ONE_GIB_F64_ELEMENTS // 32),
+                    axis=(0, 1),
+                    nan_fraction=0.05,
+                    seed=303,
+                    implementations=("mojagg", "numbagg"),
+                ),
+                MatrixTest(
                     "batched_16_vars_2k_obs",
                     (8, 16, 2_048),
                     axis=(1, 2),
@@ -364,6 +403,17 @@ class Public(BenchmarkSuite):
                     nan_fraction=0.05,
                     second_nan_fraction=0.08,
                     seed=401,
+                ),
+                RollingTest(
+                    "16x8m_1gib_window128",
+                    (16, _ONE_GIB_F64_ELEMENTS // 16),
+                    axis=1,
+                    window=128,
+                    min_count=64,
+                    nan_fraction=0.05,
+                    second_nan_fraction=0.08,
+                    seed=403,
+                    implementations=("mojagg", "numbagg"),
                 ),
                 RollingTest(
                     "4096x16_axis0_window32",
@@ -386,7 +436,17 @@ class Public(BenchmarkSuite):
                     nan_fraction=0.05,
                     second_nan_fraction=0.08,
                     seed=501,
-                )
+                ),
+                ExponentialTest(
+                    "16x8m_1gib_alpha015",
+                    (16, _ONE_GIB_F64_ELEMENTS // 16),
+                    axis=1,
+                    alpha=0.15,
+                    nan_fraction=0.05,
+                    second_nan_fraction=0.08,
+                    seed=503,
+                    implementations=("mojagg", "numbagg"),
+                ),
             ],
             "fill_tests": [
                 FillTest(
@@ -396,6 +456,15 @@ class Public(BenchmarkSuite):
                     limit=128,
                     nan_fraction=0.20,
                     seed=601,
+                ),
+                FillTest(
+                    "16x8m_1gib_axis1_blocks",
+                    (16, _ONE_GIB_F64_ELEMENTS // 16),
+                    axis=1,
+                    limit=128,
+                    nan_fraction=0.20,
+                    seed=603,
+                    implementations=("mojagg", "numbagg"),
                 ),
                 FillTest(
                     "3d_multi_axis_blocks",
@@ -430,12 +499,128 @@ class _PreparedCase:
     metadata: dict[str, Any] = field(default_factory=dict)
 
 
+def _case_implementations(case: Any) -> tuple[str, ...]:
+    configured = getattr(case, "implementations", IMPLEMENTATION_NAMES)
+    if isinstance(configured, str):
+        raise ValueError(f"{case.name}: implementations must be a sequence of package names")
+    try:
+        selected = tuple(configured)
+    except TypeError as exc:
+        raise ValueError(
+            f"{case.name}: implementations must be a sequence of package names"
+        ) from exc
+    if not selected:
+        raise ValueError(f"{case.name}: implementations must include mojagg")
+    if any(not isinstance(name, str) for name in selected):
+        raise ValueError(f"{case.name}: implementations must contain only package names")
+    unknown = tuple(name for name in selected if name not in IMPLEMENTATION_NAMES)
+    if unknown:
+        names = ", ".join(repr(name) for name in unknown)
+        raise ValueError(f"{case.name}: unknown implementation(s): {names}")
+    if len(set(selected)) != len(selected):
+        raise ValueError(f"{case.name}: implementations must not contain duplicates")
+    if "mojagg" not in selected:
+        raise ValueError(f"{case.name}: implementations must include mojagg")
+    return tuple(name for name in IMPLEMENTATION_NAMES if name in selected)
+
+
 @dataclass
 class _Timing:
     median_ns: float
     minimum_ns: float
     p95_ns: float
     median_memory_bytes: float
+    median_cpu_wall_ratio: float
+
+
+def _log(message: str) -> None:
+    timestamp = datetime.now().astimezone().strftime("%H:%M:%S")
+    print(f"[benchmark {timestamp}] {message}", flush=True)
+
+
+def _format_bytes(value: int | float) -> str:
+    amount = float(value)
+    for unit in ("B", "KiB", "MiB", "GiB", "TiB"):
+        if amount < 1024 or unit == "TiB":
+            return f"{amount:.1f}{unit}"
+        amount /= 1024
+    return f"{amount:.1f}TiB"
+
+
+def _format_duration(ns: float) -> str:
+    if ns < 1_000_000:
+        return f"{ns / 1_000:.1f}ms"
+    if ns < 1_000_000_000:
+        return f"{ns / 1_000_000:.2f}s"
+    return f"{ns / 1_000_000_000:.2f}s"
+
+
+def _prepared_bytes(prepared: _PreparedCase) -> int:
+    return sum(
+        array.nbytes
+        for array in (prepared.values, prepared.second, prepared.labels)
+        if array is not None
+    )
+
+
+def _process_thread_count() -> int:
+    status = _read_text_file("/proc/self/status")
+    if status:
+        for line in status.splitlines():
+            key, separator, value = line.partition(":")
+            if separator and key.strip() == "Threads":
+                try:
+                    return int(value.strip())
+                except ValueError:
+                    break
+    return threading.active_count()
+
+
+def _dispatch_dimensions(case: Any) -> tuple[int, int] | None:
+    shape = getattr(case, "shape", None)
+    axis = getattr(case, "axis", None)
+    if shape is None or axis is None and not hasattr(case, "axis"):
+        return None
+    axes = _axis_tuple(axis, len(shape))
+    selected = set(axes)
+    inner = math.prod(shape[index] for index in axes)
+    outer = math.prod(shape[index] for index in range(len(shape)) if index not in selected)
+    return int(outer), int(inner)
+
+
+def _dispatch_hint(case: Any, mojagg_config: Mapping[str, Any] | None) -> str:
+    dimensions = _dispatch_dimensions(case)
+    if dimensions is None or mojagg_config is None:
+        return ""
+    outer, inner = dimensions
+    minimum_groups = int(mojagg_config["parallel_min_groups"])
+    threshold = int(mojagg_config["parallel_threshold"])
+    eligible = outer >= minimum_groups and inner >= threshold
+    return (
+        f" dispatch_outer={outer:,} dispatch_inner={inner:,}"
+        f" parallel_candidate={'yes' if eligible else 'no'}"
+        f" (min_outer={minimum_groups:,} min_inner={threshold:,})"
+    )
+
+
+def _run_logged_call(label: str, call: Callable[[], Any]) -> Any:
+    _log(f"START {label}")
+    wall_started = time.perf_counter_ns()
+    cpu_started = time.process_time_ns()
+    try:
+        result = call()
+    except Exception as exc:
+        elapsed = time.perf_counter_ns() - wall_started
+        _log(f"ERROR {label}: {type(exc).__name__}: {exc} after {_format_duration(elapsed)}")
+        raise
+    elapsed = time.perf_counter_ns() - wall_started
+    cpu_elapsed = time.process_time_ns() - cpu_started
+    ratio = cpu_elapsed / elapsed if elapsed else 0.0
+    _log(
+        f"DONE {label} wall={_format_duration(elapsed)}"
+        f" cpu/wall={ratio:.2f}x threads_after={_process_thread_count()}"
+    )
+    return result
 
 
 def _axis_tuple(axis: Axis, ndim: int) -> tuple[int, ...]:
@@ -692,10 +877,6 @@ def _prepare_fill(test: FillTest) -> _PreparedCase:
 
 
 def _optional_import(name: str) -> Any | None:
-    if name == "mojagg" and "mojagg" not in sys.modules:
-        python_dir = str(Path(__file__).resolve().parent.parent / "python")
-        if python_dir not in sys.path:
-            sys.path.insert(0, python_dir)
     try:
         return importlib.import_module(name)
     except ImportError:
@@ -763,140 +944,6 @@ def _fill_call(module: Any, function: str, case: FillTest, prepared: _PreparedCa
     return getattr(module, function)(prepared.values, limit=case.limit, axis=case.axis)
 
 
-def _pandas_reduction_call(pd: Any, function: str, case: ReductionTest, prepared: _PreparedCase):
-    axis = case.axis
-    if isinstance(axis, tuple):
-        raise NotImplementedError("pandas does not provide the same multi-axis reduction")
-    if function in {"nanargmin", "nanargmax"}:
-        raise NotImplementedError("pandas arg reductions return labels rather than local indices")
-    values = prepared.values
-    if axis is None:
-        target: Any = pd.Series(values.reshape(-1))
-        pandas_axis = 0
-    elif values.ndim == 1:
-        target = pd.Series(values)
-        pandas_axis = 0
-    else:
-        target = pd.DataFrame(values)
-        pandas_axis = axis
-    if function == "allnan":
-        return target.isna().all(axis=pandas_axis)
-    if function == "anynan":
-        return target.isna().any(axis=pandas_axis)
-    if function in {"nancount", "count"}:
-        return target.count(axis=pandas_axis) if values.ndim > 1 else target.count()
-    if function == "nanquantile":
-        quantile = case.quantiles[0] if len(case.quantiles) == 1 else list(case.quantiles)
-        if values.ndim == 1:
-            return target.quantile(quantile, interpolation="linear")
-        return target.quantile(quantile, axis=pandas_axis, interpolation="linear")
-    method = {
-        "nanmax": "max",
-        "nanmean": "mean",
-        "nanmedian": "median",
-        "nanmin": "min",
-        "nanprod": "prod",
-        "nanstd": "std",
-        "nansum": "sum",
-        "nanvar": "var",
-    }.get(function)
-    if method is None:
-        raise NotImplementedError(f"no pandas adapter for {function}")
-    kwargs: dict[str, Any] = {"skipna": True}
-    if function in {"nanvar", "nanstd"}:
-        kwargs["ddof"] = case.ddof
-    if values.ndim == 1:
-        return getattr(target, method)(**kwargs)
-    return getattr(target, method)(axis=pandas_axis, **kwargs)
-
-
-def _pandas_groupby_call(pd: Any, function: str, case: GroupByTest, prepared: _PreparedCase):
-    if prepared.values.ndim != 1 or prepared.labels is None or prepared.labels.ndim != 1:
-        raise NotImplementedError("pandas adapter is provided for one-dimensional groupby cases")
-    if function in {"group_nanargmin", "group_nanargmax", "group_nansum_of_squares"}:
-        raise NotImplementedError(f"no pandas adapter for {function}")
-    series = pd.Series(prepared.values)
-    grouping = pd.Series(prepared.labels, index=series.index)
-    grouped = series.groupby(grouping, sort=False, observed=True)
-    method = {
-        "group_nanall": "all",
-        "group_nanany": "any",
-        "group_nancount": "count",
-        "group_nanfirst": "first",
-        "group_nanlast": "last",
-        "group_nanmax": "max",
-        "group_nanmean": "mean",
-        "group_nanmin": "min",
-        "group_nanprod": "prod",
-        "group_nanstd": "std",
-        "group_nansum": "sum",
-        "group_nanvar": "var",
-    }.get(function)
-    if method is None:
-        raise NotImplementedError(f"no pandas adapter for {function}")
-    kwargs: dict[str, Any] = {}
-    if function in {"group_nanvar", "group_nanstd"}:
-        kwargs["ddof"] = case.ddof
-    grouped_result = getattr(grouped, method)(**kwargs)
-    return grouped_result.reindex(np.arange(case.num_groups)).to_numpy()
-
-
-def _pandas_rolling_call(pd: Any, function: str, case: RollingTest, prepared: _PreparedCase):
-    if function in {"move_corr", "move_cov"}:
-        raise NotImplementedError("pandas binary rolling semantics are not used in this report")
-    if prepared.values.ndim > 2:
-        raise NotImplementedError("pandas rolling adapter supports at most two dimensions")
-    minimum = case.window if case.min_count is None else case.min_count
-    method = function.removeprefix("move_")
-    values = prepared.values
-    if values.ndim == 1:
-        target: Any = pd.Series(values)
-        return getattr(target.rolling(case.window, min_periods=minimum), method)().to_numpy()
-    frame = pd.DataFrame(values)
-    if case.axis == 1:
-        frame = frame.T
-        result = getattr(frame.rolling(case.window, min_periods=minimum), method)()
-        return result.T.to_numpy()
-    if case.axis == 0:
-        return getattr(frame.rolling(case.window, min_periods=minimum), method)().to_numpy()
-    raise NotImplementedError("pandas rolling adapter supports axes 0 and 1")
-
-
-def _pandas_matrix_call(pd: Any, function: str, case: MatrixTest, prepared: _PreparedCase):
-    if prepared.values.ndim != 2 or case.axis != (0, 1):
-        raise NotImplementedError(
-            "pandas matrix adapter supports only a 2D vars-by-observations case"
-        )
-    frame = pd.DataFrame(prepared.values.T)
-    if function == "nancorrmatrix":
-        return frame.corr().to_numpy()
-    if function == "nancovmatrix":
-        return frame.cov(ddof=1).to_numpy()
-    raise NotImplementedError(f"no pandas adapter for {function}")
-
-
-def _pandas_exponential_call(
-    pd: Any,
-    function: str,
-    case: ExponentialTest,
-    prepared: _PreparedCase,
-):
-    raise NotImplementedError(
-        f"pandas ewm semantics are not declared equivalent to {function}; report N/A"
-    )
-
-
-def _pandas_fill_call(pd: Any, function: str, case: FillTest, prepared: _PreparedCase):
-    if isinstance(case.axis, tuple):
-        raise NotImplementedError("pandas does not provide the same multi-axis fill")
-    method = "bfill" if function == "bfill" else "ffill"
-    if prepared.values.ndim == 1:
-        return getattr(pd.Series(prepared.values), method)(limit=case.limit).to_numpy()
-    return getattr(pd.DataFrame(prepared.values), method)(
-        axis=case.axis, limit=case.limit
-    ).to_numpy()
-
-
 def _compare_outputs(left: Any, right: Any) -> bool:
     left_array = np.asarray(left)
     right_array = np.asarray(right)
@@ -908,25 +955,36 @@ def _compare_outputs(left: Any, right: Any) -> bool:
         return bool(np.array_equal(left_array, right_array))
 
 
-def _measure(call: Callable[[], Any], warmups: int, repeats: int) -> _Timing:
-    for _ in range(warmups):
-        call()
+def _measure(call: Callable[[], Any], warmups: int, repeats: int, label: str) -> _Timing:
+    for warmup_index in range(warmups):
+        _run_logged_call(f"{label} warmup {warmup_index + 1}/{warmups}", call)
     gc.collect()
     times: list[float] = []
+    cpu_wall_ratios: list[float] = []
     memories: list[float] = []
     tracemalloc.start()
     try:
-        for _ in range(repeats):
+        for repeat_index in range(repeats):
             gc.collect()
             current_before, _ = tracemalloc.get_traced_memory()
             tracemalloc.reset_peak()
             started = time.perf_counter_ns()
+            cpu_started = time.process_time_ns()
             result = call()
             elapsed = float(time.perf_counter_ns() - started)
+            cpu_elapsed = float(time.process_time_ns() - cpu_started)
             _, peak = tracemalloc.get_traced_memory()
             times.append(elapsed)
+            cpu_wall_ratios.append(cpu_elapsed / elapsed if elapsed else 0.0)
             memories.append(float(max(0, peak - current_before)))
             del result
+            _log(
+                f"DONE {label} repeat {repeat_index + 1}/{repeats}"
+                f" wall={_format_duration(elapsed)}"
+                f" cpu/wall={cpu_wall_ratios[-1]:.2f}x"
+                f" python_peak={_format_bytes(memories[-1])}"
+                f" threads_after={_process_thread_count()}"
+            )
     finally:
         tracemalloc.stop()
     ordered = sorted(times)
@@ -936,6 +994,7 @@ def _measure(call: Callable[[], Any], warmups: int, repeats: int) -> _Timing:
         minimum_ns=float(min(times)),
         p95_ns=float(ordered[p95_index]),
         median_memory_bytes=float(statistics.median(memories)),
+        median_cpu_wall_ratio=float(statistics.median(cpu_wall_ratios)),
     )
 
 
@@ -963,6 +1022,7 @@ def _record(
         "minimum_ns": None if timing is None else timing.minimum_ns,
         "p95_ns": None if timing is None else timing.p95_ns,
         "memory_bytes": None if timing is None else timing.median_memory_bytes,
+        "cpu_wall_ratio": None if timing is None else timing.median_cpu_wall_ratio,
         "time_ratio": None,
         "memory_ratio": None,
     }
@@ -978,7 +1038,9 @@ def _run_adapter(
     baseline_output: Any | None,
     suite: BenchmarkSuite,
 ) -> dict[str, Any]:
+    label = f"{section}/{case_name}/{function}/{implementation}"
     if call is None:
+        _log(f"SKIP {label}: adapter unavailable")
         return _record(
             section,
             function,
@@ -989,11 +1051,16 @@ def _run_adapter(
             error="adapter unavailable",
         )
     try:
+        _log(
+            f"BEGIN {label} warmups={suite.warmups} repeats={suite.repeats}"
+            f" verify={suite.verify_results and baseline_output is not None and implementation != 'mojagg'}"
+        )
         verification = None
         if suite.verify_results and baseline_output is not None and implementation != "mojagg":
-            candidate = call()
+            candidate = _run_logged_call(f"{label} verification", call)
             verification = "pass" if _compare_outputs(baseline_output, candidate) else "mismatch"
             if verification == "mismatch":
+                _log(f"MISMATCH {label}: verification failed")
                 return _record(
                     section,
                     function,
@@ -1004,8 +1071,8 @@ def _run_adapter(
                     error="result mismatch against mojagg",
                     verification=verification,
                 )
-        timing = _measure(call, suite.warmups, suite.repeats)
-        return _record(
+        timing = _measure(call, suite.warmups, suite.repeats, label)
+        record = _record(
             section,
             function,
             case_name,
@@ -1015,7 +1082,14 @@ def _run_adapter(
             timing=timing,
             verification=verification,
         )
+        _log(
+            f"END {label} status=ok median={_format_duration(timing.median_ns)}"
+            f" p95={_format_duration(timing.p95_ns)}"
+            f" cpu/wall={timing.median_cpu_wall_ratio:.2f}x"
+        )
+        return record
     except Exception as exc:  # keep one unsupported adapter from hiding the rest
+        _log(f"ERROR {label}: {type(exc).__name__}: {exc}")
         return _record(
             section,
             function,
@@ -1055,25 +1129,41 @@ def _run_family(
     call_for: Callable[[Any, str, Any, _PreparedCase], Any],
     mojagg: Any,
     numbagg: Any | None,
-    pandas: Any | None,
     suite: BenchmarkSuite,
+    mojagg_config: Mapping[str, Any] | None = None,
 ) -> list[dict[str, Any]]:
     records: list[dict[str, Any]] = []
-    pandas_callers: dict[str, Callable[[Any, str, Any, _PreparedCase], Any]] = {
-        "reduction": _pandas_reduction_call,
-        "groupby": _pandas_groupby_call,
-        "matrix": _pandas_matrix_call,
-        "rolling": _pandas_rolling_call,
-        "exponential": _pandas_exponential_call,
-        "non-reduction": _pandas_fill_call,
-    }
-    for case in cases:
+    case_items = list(cases)
+    family_started = time.perf_counter_ns()
+    _log(
+        f"FAMILY {section} start cases={len(case_items)} functions={len(functions)}"
+        " implementation_selection=per-case"
+    )
+    for case_index, case in enumerate(case_items, start=1):
+        selected_implementations = _case_implementations(case)
+        _log(
+            f"CASE {section} {case_index}/{len(case_items)} {case.name}"
+            f" prepare shape={getattr(case, 'shape', '?')}"
+        )
         prepared = prepare(case)
+        _log(
+            f"READY {section} {case_index}/{len(case_items)} {case.name}"
+            f" data={_format_bytes(_prepared_bytes(prepared))}"
+            f" dtype={prepared.metadata.get('dtype', '?')}"
+            f" implementations={','.join(selected_implementations)}"
+            f"{_dispatch_hint(case, mojagg_config)}"
+        )
+        case_metadata = dict(prepared.metadata)
+        case_metadata["implementations"] = list(selected_implementations)
         for function in functions:
-            case_metadata = dict(prepared.metadata)
             baseline_output: Any | None = None
             try:
-                baseline_output = call_for(mojagg, function, case, prepared)
+                baseline_output = _run_logged_call(
+                    f"{section}/{case.name}/{function}/mojagg baseline",
+                    lambda function=function, case=case, prepared=prepared: call_for(
+                        mojagg, function, case, prepared
+                    ),
+                )
                 records.append(
                     _run_adapter(
                         section,
@@ -1089,6 +1179,7 @@ def _run_family(
                     )
                 )
             except AttributeError:
+                _log(f"SKIP {section}/{case.name}/{function}/mojagg: function unavailable")
                 records.append(
                     _record(
                         section,
@@ -1101,6 +1192,7 @@ def _run_family(
                     )
                 )
             except Exception as exc:
+                _log(f"ERROR {section}/{case.name}/{function}/mojagg: {type(exc).__name__}: {exc}")
                 records.append(
                     _record(
                         section,
@@ -1114,8 +1206,11 @@ def _run_family(
                 )
                 baseline_output = None
 
-            for implementation, module in (("numbagg", numbagg), ("pandas", pandas)):
-                if module is None:
+            for implementation, module in (("numbagg", numbagg),):
+                if implementation not in selected_implementations:
+                    _log(
+                        f"SKIP {section}/{case.name}/{function}/{implementation}: disabled for case"
+                    )
                     records.append(
                         _record(
                             section,
@@ -1124,39 +1219,57 @@ def _run_family(
                             case_metadata,
                             implementation,
                             "na",
-                            error="package unavailable",
+                            error="disabled for case",
+                        )
+                    )
+                    continue
+                if module is None:
+                    reason = "package unavailable" if suite.include_numbagg else "disabled by suite"
+                    _log(f"SKIP {section}/{case.name}/{function}/{implementation}: {reason}")
+                    records.append(
+                        _record(
+                            section,
+                            function,
+                            case.name,
+                            case_metadata,
+                            implementation,
+                            "na",
+                            error=reason,
                         )
                     )
                     continue
                 try:
-                    if implementation == "numbagg":
-                        numbagg_call = _numbagg_matrix_call if section == "matrix" else call_for
+                    numbagg_call = _numbagg_matrix_call if section == "matrix" else call_for
 
-                        def call(
-                            function=function,
-                            case=case,
-                            prepared=prepared,
-                            numbagg_call=numbagg_call,
-                        ):
-                            return numbagg_call(numbagg, function, case, prepared)
-                    else:
-                        pandas_call = pandas_callers[section]
+                    def call(
+                        function=function,
+                        case=case,
+                        prepared=prepared,
+                        numbagg_call=numbagg_call,
+                    ):
+                        return numbagg_call(numbagg, function, case, prepared)
 
-                        def call(
-                            pandas_call=pandas_call,
-                            function=function,
-                            case=case,
-                            prepared=prepared,
-                        ):
-                            return pandas_call(pandas, function, case, prepared)
-
-                    call()
+                    _run_logged_call(
+                        f"{section}/{case.name}/{function}/{implementation} probe", call
+                    )
                 except (AttributeError, NotImplementedError):
+                    _log(
+                        f"SKIP {section}/{case.name}/{function}/{implementation}"
+                        ": adapter unavailable"
+                    )
                     call = None
                 except TypeError as exc:
                     if "cannot specify both 'axis' and 'axes'" in str(exc):
+                        _log(
+                            f"SKIP {section}/{case.name}/{function}/{implementation}"
+                            ": incompatible axis arguments"
+                        )
                         call = None
                     else:
+                        _log(
+                            f"ERROR {section}/{case.name}/{function}/{implementation}:"
+                            f" {type(exc).__name__}: {exc}"
+                        )
                         records.append(
                             _record(
                                 section,
@@ -1170,6 +1283,10 @@ def _run_family(
                         )
                         continue
                 except Exception as exc:
+                    _log(
+                        f"ERROR {section}/{case.name}/{function}/{implementation}:"
+                        f" {type(exc).__name__}: {exc}"
+                    )
                     records.append(
                         _record(
                             section,
@@ -1194,17 +1311,19 @@ def _run_family(
                         suite,
                     )
                 )
+        _log(f"CASE {section} {case_index}/{len(case_items)} {case.name} complete")
+    _log(
+        f"FAMILY {section} complete records={len(records)}"
+        f" elapsed={_format_duration(time.perf_counter_ns() - family_started)}"
+    )
     return records
 
 
-def _suite_records(suite: BenchmarkSuite) -> list[dict[str, Any]]:
-    mojagg = _optional_import("mojagg")
-    if mojagg is None:
-        raise RuntimeError(
-            "mojagg is not installed; build or install it before running this script"
-        )
+def _suite_records(
+    suite: BenchmarkSuite,
+    mojagg_config: Mapping[str, Any],
+) -> list[dict[str, Any]]:
     numbagg = _optional_import("numbagg") if suite.include_numbagg else None
-    pandas = _optional_import("pandas") if suite.include_pandas else None
     records: list[dict[str, Any]] = []
     records.extend(
         _run_family(
@@ -1215,8 +1334,8 @@ def _suite_records(suite: BenchmarkSuite) -> list[dict[str, Any]]:
             _reduction_call,
             mojagg,
             numbagg,
-            pandas,
             suite,
+            mojagg_config,
         )
     )
     records.extend(
@@ -1228,8 +1347,8 @@ def _suite_records(suite: BenchmarkSuite) -> list[dict[str, Any]]:
             _groupby_call,
             mojagg,
             numbagg,
-            pandas,
             suite,
+            mojagg_config,
         )
     )
     records.extend(
@@ -1241,8 +1360,8 @@ def _suite_records(suite: BenchmarkSuite) -> list[dict[str, Any]]:
             _matrix_call,
             mojagg,
             numbagg,
-            pandas,
             suite,
+            mojagg_config,
         )
     )
     records.extend(
@@ -1254,8 +1373,8 @@ def _suite_records(suite: BenchmarkSuite) -> list[dict[str, Any]]:
             _rolling_call,
             mojagg,
             numbagg,
-            pandas,
             suite,
+            mojagg_config,
         )
     )
     records.extend(
@@ -1267,8 +1386,8 @@ def _suite_records(suite: BenchmarkSuite) -> list[dict[str, Any]]:
             _exponential_call,
             mojagg,
             numbagg,
-            pandas,
             suite,
+            mojagg_config,
         )
     )
     records.extend(
@@ -1280,8 +1399,8 @@ def _suite_records(suite: BenchmarkSuite) -> list[dict[str, Any]]:
             _fill_call,
             mojagg,
             numbagg,
-            pandas,
             suite,
+            mojagg_config,
         )
     )
     _add_ratios(records)
@@ -1515,7 +1634,6 @@ def _suite_metadata(suite: BenchmarkSuite) -> dict[str, Any]:
             "repeats": suite.repeats,
             "verify_results": suite.verify_results,
             "include_numbagg": suite.include_numbagg,
-            "include_pandas": suite.include_pandas,
             "functions": {
                 "reduction": suite.reduction_functions,
                 "groupby": suite.groupby_functions,
@@ -1536,12 +1654,7 @@ def _suite_metadata(suite: BenchmarkSuite) -> dict[str, Any]:
     )
 
 
-def build_report(suite: BenchmarkSuite) -> dict[str, Any]:
-    """Run ``suite`` and return the JSON-serializable report model."""
-
-    if suite.warmups < 0 or suite.repeats <= 0:
-        raise ValueError("warmups must be non-negative and repeats must be positive")
-    records = _suite_records(suite)
+def _resolve_mojagg_config() -> dict[str, Any]:
     try:
         from mojagg.config import get_config
 
@@ -1563,6 +1676,84 @@ def build_report(suite: BenchmarkSuite) -> dict[str, Any]:
             "gpu_min_bytes": 1 << 26,
             "simd_width": 0,
         }
+    return mojagg_config
+
+
+def _log_run_start(suite: BenchmarkSuite, mojagg_config: Mapping[str, Any]) -> None:
+    case_count = sum(
+        len(cases)
+        for cases in (
+            suite.reduction_tests,
+            suite.groupby_tests,
+            suite.matrix_tests,
+            suite.rolling_tests,
+            suite.exponential_tests,
+            suite.fill_tests,
+        )
+    )
+    function_count = sum(
+        len(functions)
+        for functions in (
+            suite.reduction_functions,
+            suite.groupby_functions,
+            suite.matrix_functions,
+            suite.rolling_functions,
+            suite.exponential_functions,
+            suite.fill_functions,
+        )
+    )
+    thread_environment = {
+        name: os.environ[name]
+        for name in (
+            "MOJAGG_THREADS",
+            "NUMBA_NUM_THREADS",
+            "OMP_NUM_THREADS",
+            "MKL_NUM_THREADS",
+            "OPENBLAS_NUM_THREADS",
+            "VECLIB_MAXIMUM_THREADS",
+        )
+        if name in os.environ
+    }
+    configured_threads = int(mojagg_config["threads"])
+    effective_threads = (
+        f"auto physical={_physical_cpu_count() or '?'}"
+        if configured_threads == 0
+        else str(configured_threads)
+    )
+    _log(
+        f"RUN start suite={suite.name} cases={case_count} functions={function_count}"
+        f" warmups={suite.warmups} repeats={suite.repeats}"
+        f" verify={suite.verify_results}"
+    )
+    _log(
+        f"HOST pid={os.getpid()} logical={os.cpu_count() or '?'}"
+        f" physical={_physical_cpu_count() or '?'} affinity={_process_affinity() or '?'}"
+        f" process_threads={_process_thread_count()}"
+    )
+    _log(
+        f"MOJAGG backend={mojagg_config['backend']} configured_threads={configured_threads}"
+        f" effective_threads={effective_threads}"
+        f" parallel_threshold={mojagg_config['parallel_threshold']:,}"
+        f" parallel_min_groups={mojagg_config['parallel_min_groups']}"
+        f" simd_width={mojagg_config['simd_width']}"
+    )
+    _log(
+        "CPU/wall is process CPU time divided by elapsed time; values near 1x"
+        " indicate serial execution, while higher values indicate CPU parallelism."
+    )
+    if thread_environment:
+        _log(f"THREAD_ENV {thread_environment}")
+
+
+def build_report(suite: BenchmarkSuite) -> dict[str, Any]:
+    """Run ``suite`` and return the JSON-serializable report model."""
+
+    if suite.warmups < 0 or suite.repeats <= 0:
+        raise ValueError("warmups must be non-negative and repeats must be positive")
+    mojagg_config = _resolve_mojagg_config()
+    _log_run_start(suite, mojagg_config)
+    records = _suite_records(suite, mojagg_config)
+    _log(f"RUN records complete count={len(records)}")
     return {
         "schema_version": 2,
         "generated_at": datetime.now(timezone.utc).isoformat(),
@@ -1579,6 +1770,7 @@ def build_report(suite: BenchmarkSuite) -> dict[str, Any]:
         "measurement": {
             "time": "median wall-clock time across measured calls",
             "memory": "median peak Python-tracked allocation during a call (tracemalloc)",
+            "cpu_wall_ratio": "median process CPU time divided by wall-clock time",
             "ratio": "implementation divided by mojagg; values below 1 are better for mojagg",
         },
         "records": records,
@@ -2397,7 +2589,7 @@ a { color: var(--mint); text-decoration: none; }
 """
     script = r"""
 const REPORT=__REPORT__;
-const COLORS={mojagg:'#55e6bd',numbagg:'#6da8ff',pandas:'#ffc857'};
+const COLORS={mojagg:'#55e6bd',numbagg:'#6da8ff'};
 const $=(selector,root=document)=>root.querySelector(selector);
 const $$=(selector,root=document)=>Array.from(root.querySelectorAll(selector));
 const esc=value=>String(value??'').replace(/[&<>"']/g,c=>({'&':'&amp;','<':'&lt;','>':'&gt;','"':'&quot;',"'":'&#39;'}[c]));
@@ -2411,7 +2603,7 @@ const sectionNames=['reduction','groupby','matrix','rolling','exponential','non-
 const sectionTitles={reduction:'Reductions',groupby:'Group by',matrix:'Matrix functions',rolling:'Rolling windows',exponential:'Exponential moving','non-reduction':'Non-reduction'};
 const sectionDescriptions={reduction:'NaN-aware scalar reductions across contiguous, batched, and multi-axis inputs.',groupby:'Dense grouped reductions across label dtypes and cardinalities.',matrix:'Static covariance and correlation matrices with batched cores.',rolling:'Trailing window operations with controlled NaN density and window size.',exponential:'Exponentially weighted moving operations and alpha sensitivity.','non-reduction':'Forward and backward fill workloads, including multi-axis cores.'};
 const records=REPORT.records||[];
-const implementations=['mojagg','numbagg','pandas'];
+const implementations=['mojagg','numbagg'];
 
 function formatCaseMeta(m){
   if(!m)return'';
@@ -2494,13 +2686,9 @@ function top3Markup(){
       const moj=impls.mojagg;
       if(!moj||moj.status!=='ok'||!moj.time_ns)continue;
       const num=impls.numbagg;
-      const pan=impls.pandas;
       if(num&&num.status==='ok'&&num.time_ns){
         const speedup=num.time_ns/moj.time_ns;
         candidates.push({speedup,func:moj.function,case:moj.case,meta:moj.case_metadata,mojTime:moj.time_ns,refTime:num.time_ns,refName:'numbagg'});
-      }else if(pan&&pan.status==='ok'&&pan.time_ns){
-        const speedup=pan.time_ns/moj.time_ns;
-        candidates.push({speedup,func:moj.function,case:moj.case,meta:moj.case_metadata,mojTime:moj.time_ns,refTime:pan.time_ns,refName:'pandas'});
       }
     }
     candidates.sort((a,b)=>b.speedup-a.speedup);
@@ -2533,13 +2721,9 @@ function worst3Markup(){
       const moj=impls.mojagg;
       if(!moj||moj.status!=='ok'||!moj.time_ns)continue;
       const num=impls.numbagg;
-      const pan=impls.pandas;
       if(num&&num.status==='ok'&&num.time_ns){
         const speedup=num.time_ns/moj.time_ns;
         candidates.push({speedup,func:moj.function,case:moj.case,meta:moj.case_metadata,mojTime:moj.time_ns,refTime:num.time_ns,refName:'numbagg'});
-      }else if(pan&&pan.status==='ok'&&pan.time_ns){
-        const speedup=pan.time_ns/moj.time_ns;
-        candidates.push({speedup,func:moj.function,case:moj.case,meta:moj.case_metadata,mojTime:moj.time_ns,refTime:pan.time_ns,refName:'pandas'});
       }
     }
     candidates.sort((a,b)=>a.speedup-b.speedup);
@@ -2566,7 +2750,7 @@ function scalingMarkup(){
     const shape=r.case_metadata?.shape;
     if(!shape||!Array.isArray(shape))continue;
     const sz=shape.reduce((a,b)=>a*b,1);
-    if(!sizeMap.has(sz))sizeMap.set(sz,{mojagg:[],numbagg:[],pandas:[]});
+    if(!sizeMap.has(sz))sizeMap.set(sz,{mojagg:[],numbagg:[]});
     if(sizeMap.get(sz)[r.implementation]){
       sizeMap.get(sz)[r.implementation].push(r.time_ns);
     }
@@ -2579,10 +2763,9 @@ function scalingMarkup(){
       const b=sizeMap.get(sz);
       const mMed=b.mojagg.length?b.mojagg.sort((x,y)=>x-y)[Math.floor(b.mojagg.length/2)]:null;
       const nMed=b.numbagg.length?b.numbagg.sort((x,y)=>x-y)[Math.floor(b.numbagg.length/2)]:null;
-      const pMed=b.pandas.length?b.pandas.sort((x,y)=>x-y)[Math.floor(b.pandas.length/2)]:null;
-      return{sz,mMed,nMed,pMed};
+      return{sz,mMed,nMed};
     });
-    const allTimes=dataPoints.flatMap(d=>[d.mMed,d.nMed,d.pMed].filter(x=>x!=null));
+    const allTimes=dataPoints.flatMap(d=>[d.mMed,d.nMed].filter(x=>x!=null));
     const maxTime=Math.max(1,...allTimes);
     const xPos=i=>L+(i/Math.max(1,sizes.length-1))*(W-L-R);
     const yPos=t=>(H-B)-(t/maxTime)*(H-T-B);
@@ -2596,7 +2779,7 @@ function scalingMarkup(){
     const drawLine=(impl,color)=>{
       const pts=[];
       dataPoints.forEach((d,i)=>{
-        const t=impl==='mojagg'?d.mMed:impl==='numbagg'?d.nMed:d.pMed;
+        const t=impl==='mojagg'?d.mMed:d.nMed;
         if(t!=null)pts.push({x:xPos(i),y:yPos(t),t,sz:d.sz});
       });
       if(!pts.length)return'';
@@ -2612,7 +2795,7 @@ function scalingMarkup(){
     sizes.forEach((sz,i)=>{
       xLabels+='<text x="'+xPos(i)+'" y="'+(H-15)+'" fill="#90a9c2" font-size="10" text-anchor="middle">'+fmtCount(sz)+'</text>';
     });
-    sizeChartSvg='<svg viewBox="0 0 '+W+' '+H+'" style="width:100%;height:auto" role="img" aria-label="Scaling by data size">'+gridLines+drawLine('pandas',COLORS.pandas)+drawLine('numbagg',COLORS.numbagg)+drawLine('mojagg',COLORS.mojagg)+xLabels+'<text x="'+((W+L)/2)+'" y="'+(H-2)+'" fill="#90a9c2" font-size="10" text-anchor="middle">Input elements (array size) →</text></svg>';
+    sizeChartSvg='<svg viewBox="0 0 '+W+' '+H+'" style="width:100%;height:auto" role="img" aria-label="Scaling by data size">'+gridLines+drawLine('numbagg',COLORS.numbagg)+drawLine('mojagg',COLORS.mojagg)+xLabels+'<text x="'+((W+L)/2)+'" y="'+(H-2)+'" fill="#90a9c2" font-size="10" text-anchor="middle">Input elements (array size) →</text></svg>';
   }else{
     sizeChartSvg='<div class="empty">No size data available.</div>';
   }
@@ -2644,7 +2827,7 @@ function scalingMarkup(){
     catChartSvg='<div class="empty">No comparable operations data available.</div>';
   }
 
-  return '<section class="scaling-panel" id="scaling-trends"><div class="showcase-head"><div><div class="eyebrow">Scaling & Distribution</div><h2>Scaling Profile & Operational Advantage</h2><p>Empirical evidence of how Mojagg scales with array size and maintains consistent speedups across functional categories.</p></div></div><div class="scaling-grid"><div class="scaling-chart-card"><h3>Latency vs Dataset Size</h3><p>Median execution time across element counts. Mojagg scales flatter and widens its advantage as datasets grow.</p><div>'+sizeChartSvg+'</div><div class="legend" style="justify-content:center;margin-top:8px"><span><i class="dot" style="background:'+COLORS.mojagg+'"></i>mojagg</span><span><i class="dot" style="background:'+COLORS.numbagg+'"></i>numbagg</span><span><i class="dot" style="background:'+COLORS.pandas+'"></i>pandas</span></div></div><div class="scaling-chart-card"><h3>Speedup Across All Operation Categories</h3><p>Median speedup factor of mojagg vs numbagg (values &gt; 1.0× indicate mojagg is faster).</p><div>'+catChartSvg+'</div><div style="font-size:0.7rem;color:var(--muted);text-align:center;margin-top:8px">Dashed line = 1.0× parity with numbagg. Longer mint bars indicate higher mojagg speedup.</div></div></div></section>';
+  return '<section class="scaling-panel" id="scaling-trends"><div class="showcase-head"><div><div class="eyebrow">Scaling & Distribution</div><h2>Scaling Profile & Operational Advantage</h2><p>Empirical evidence of how Mojagg scales with array size and maintains consistent speedups across functional categories.</p></div></div><div class="scaling-grid"><div class="scaling-chart-card"><h3>Latency vs Dataset Size</h3><p>Median execution time across element counts. Mojagg scales flatter and widens its advantage as datasets grow.</p><div>'+sizeChartSvg+'</div><div class="legend" style="justify-content:center;margin-top:8px"><span><i class="dot" style="background:'+COLORS.mojagg+'"></i>mojagg</span><span><i class="dot" style="background:'+COLORS.numbagg+'"></i>numbagg</span></div></div><div class="scaling-chart-card"><h3>Speedup Across All Operation Categories</h3><p>Median speedup factor of mojagg vs numbagg (values &gt; 1.0× indicate mojagg is faster).</p><div>'+catChartSvg+'</div><div style="font-size:0.7rem;color:var(--muted);text-align:center;margin-top:8px">Dashed line = 1.0× parity with numbagg. Longer mint bars indicate higher mojagg speedup.</div></div></div></section>';
 }
 
 function renderSidebar(){
@@ -2700,7 +2883,7 @@ function barChart(rows){
 }
 
 function scatterChart(rows){
-  const points=rows.filter(r=>r.implementation!=='mojagg'&&r.implementation!=='pandas'&&r.status==='ok'&&r.time_ratio!=null&&r.memory_ratio!=null);
+  const points=rows.filter(r=>r.implementation==='numbagg'&&r.status==='ok'&&r.time_ratio!=null&&r.memory_ratio!=null);
   if(!points.length)return'<div class="empty">No comparable time/memory points for this filter.</div>';
   const width=700,height=340,left=58,right=20,top=20,bottom=45;
   const maxX=Math.max(1.25,...points.map(r=>r.time_ratio));
@@ -2711,7 +2894,7 @@ function scatterChart(rows){
   for(const point of points){
     out+='<circle cx="'+x(point.time_ratio)+'" cy="'+y(point.memory_ratio)+'" r="5" fill="'+COLORS[point.implementation]+'"><title>'+esc(point.implementation)+' · '+esc(point.function)+' · '+esc(point.case)+' · time '+fmtRatio(point.time_ratio)+' · memory '+fmtRatio(point.memory_ratio)+'</title></circle>';
   }
-  out+='</svg><div class="memory-callout"><strong>Memory Note:</strong> Mojagg and numbagg execute zero-copy compiled kernels with minimal Python-heap overhead (0–3 KiB, ratio ≈ 1.00×). (Pandas is omitted from this scatter plot to preserve the comparison scale against numbagg).</div>';
+  out+='</svg><div class="memory-callout"><strong>Memory Note:</strong> Mojagg and numbagg execute zero-copy compiled kernels with minimal Python-heap overhead (0–3 KiB, ratio ≈ 1.00×).</div>';
   return out;
 }
 
@@ -2892,7 +3075,7 @@ init();
         f"<title>{title}</title>\n<style>{stylesheet}</style>\n</head>\n<body>\n"
         '<header class="hero"><div class="eyebrow">mojagg performance lab</div>'
         "<h1>Fast paths, visible.</h1>"
-        "<p>One reproducible snapshot across mojagg, numbagg, and pandas. Ratios are normalized to mojagg, with lower values representing less time or memory.</p>"
+        "<p>One reproducible snapshot across mojagg and numbagg. Ratios are normalized to mojagg, with lower values representing less time or memory.</p>"
         '<div class="meta" id="hero-meta"></div></header>\n'
         '<div class="app-layout">\n'
         '<aside class="sidebar" id="sidebar"></aside>\n'
@@ -2975,7 +3158,6 @@ def main(argv: Sequence[str] | None = None) -> int:
         "--no-verify", action="store_true", help="skip result comparison before timing"
     )
     parser.add_argument("--no-numbagg", action="store_true")
-    parser.add_argument("--no-pandas", action="store_true")
     args = parser.parse_args(argv)
     suite_cls = {"quick": Quick, "public": Public, "stress": Stress}[args.profile]
     suite = suite_cls()
@@ -2987,7 +3169,6 @@ def main(argv: Sequence[str] | None = None) -> int:
         suite.repeats = args.repeats
     suite.verify_results = not args.no_verify
     suite.include_numbagg = not args.no_numbagg
-    suite.include_pandas = not args.no_pandas
     report = run_benchmark(suite, args.output, json_output=args.json_output)
     successful = sum(row["status"] == "ok" for row in report["records"])
     print(f"Wrote {args.output} ({successful} successful measurements)")

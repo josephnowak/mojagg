@@ -14,7 +14,7 @@ from mojagg.drivers.guvectorize import (
 
 @always_inline
 def _move_exp_nanvar[
-    dtype: DType, take_sqrt: Bool
+    dtype: DType, take_sqrt: Bool, scalar_alpha: Bool
 ](
     values: Span[Scalar[dtype], ImmUntrackedOrigin],
     alphas: Span[Scalar[dtype], ImmUntrackedOrigin],
@@ -29,16 +29,27 @@ def _move_exp_nanvar[
     var values_ptr = values.unsafe_ptr()
     var alphas_ptr = alphas.unsafe_ptr()
     var destination_ptr = destination.unsafe_ptr()
+    var scalar_alpha_value = Float64(0.0)
+    var scalar_decay = Float64(0.0)
+    comptime if scalar_alpha:
+        scalar_alpha_value = Float64(alphas_ptr[unsafe_offset=0])
+        scalar_decay = 1.0 - scalar_alpha_value
+    var scalar_decay_squared = scalar_decay * scalar_decay
 
     for i in range(len(values)):
         var value = values_ptr[unsafe_offset=i]
-        var alpha = Float64(alphas_ptr[unsafe_offset=i])
-        var decay = 1.0 - alpha
+        var alpha = scalar_alpha_value
+        var decay = scalar_decay
+        var decay_squared = scalar_decay_squared
+        comptime if not scalar_alpha:
+            alpha = Float64(alphas_ptr[unsafe_offset=i])
+            decay = 1.0 - alpha
+            decay_squared = decay * decay
 
         sum_x_2 *= decay
         sum_x *= decay
         sum_weight *= decay
-        sum_weight_2 *= decay * decay
+        sum_weight_2 *= decay_squared
         weight *= decay
 
         if not isnan(value):
@@ -48,20 +59,19 @@ def _move_exp_nanvar[
             sum_weight_2 += 1.0
             weight += alpha
 
-        if sum_weight != 0.0:
-            var var_biased = (sum_x_2 / sum_weight) - (
-                (sum_x / sum_weight) * (sum_x / sum_weight)
-            )
+        # Gate on the cheap conditions before dividing: below the weight
+        # threshold the arithmetic would be discarded anyway.
+        var output = nan_or_zero[dtype]()
+        if weight >= min_weight and sum_weight != 0.0:
+            var mean = sum_x / sum_weight
+            var var_biased = sum_x_2 / sum_weight - mean * mean
             var bias = 1.0 - sum_weight_2 / (sum_weight * sum_weight)
-            if weight >= min_weight and bias > 0.0:
+            if bias > 0.0:
                 var result = var_biased / bias
                 comptime if take_sqrt:
                     result = sqrt(result)
-                destination_ptr[unsafe_offset=i] = result.cast[dtype]()
-            else:
-                destination_ptr[unsafe_offset=i] = nan_or_zero[dtype]()
-        else:
-            destination_ptr[unsafe_offset=i] = nan_or_zero[dtype]()
+                output = result.cast[dtype]()
+        destination_ptr[unsafe_offset=i] = output
 
 
 struct MoveExpNanVarKernel[dtype: DType](GUFuncKernel, ImplicitlyCopyable):
@@ -81,7 +91,7 @@ struct MoveExpNanVarKernel[dtype: DType](GUFuncKernel, ImplicitlyCopyable):
     @always_inline
     def __call__(mut self, tensors: Self.Signature):
         var input, alpha, output = tensors
-        _move_exp_nanvar[Self.dtype, False](
+        _move_exp_nanvar[Self.dtype, False, False](
             input.read_span(),
             alpha.read_span(),
             output.write_span(),
@@ -106,7 +116,61 @@ struct MoveExpNanStdKernel[dtype: DType](GUFuncKernel, ImplicitlyCopyable):
     @always_inline
     def __call__(mut self, tensors: Self.Signature):
         var input, alpha, output = tensors
-        _move_exp_nanvar[Self.dtype, True](
+        _move_exp_nanvar[Self.dtype, True, False](
+            input.read_span(),
+            alpha.read_span(),
+            output.write_span(),
+            self.min_weight,
+        )
+
+
+struct MoveExpNanVarScalarKernel[dtype: DType](
+    GUFuncKernel, ImplicitlyCopyable
+):
+    """``(n), () -> (n)`` moving variance for scalar alpha."""
+
+    comptime Signature = Tuple[
+        GUTensor[Self.dtype, False, CoreSpec[Dim[0]]],
+        GUTensor[Self.dtype, False, CoreSpec[]],
+        GUTensor[Self.dtype, True, CoreSpec[Dim[0]]],
+    ]
+
+    var min_weight: Float64
+
+    def __init__(out self, min_weight: Float64):
+        self.min_weight = min_weight
+
+    @always_inline
+    def __call__(mut self, tensors: Self.Signature):
+        var input, alpha, output = tensors
+        _move_exp_nanvar[Self.dtype, False, True](
+            input.read_span(),
+            alpha.read_span(),
+            output.write_span(),
+            self.min_weight,
+        )
+
+
+struct MoveExpNanStdScalarKernel[dtype: DType](
+    GUFuncKernel, ImplicitlyCopyable
+):
+    """``(n), () -> (n)`` moving standard deviation for scalar alpha."""
+
+    comptime Signature = Tuple[
+        GUTensor[Self.dtype, False, CoreSpec[Dim[0]]],
+        GUTensor[Self.dtype, False, CoreSpec[]],
+        GUTensor[Self.dtype, True, CoreSpec[Dim[0]]],
+    ]
+
+    var min_weight: Float64
+
+    def __init__(out self, min_weight: Float64):
+        self.min_weight = min_weight
+
+    @always_inline
+    def __call__(mut self, tensors: Self.Signature):
+        var input, alpha, output = tensors
+        _move_exp_nanvar[Self.dtype, True, True](
             input.read_span(),
             alpha.read_span(),
             output.write_span(),
