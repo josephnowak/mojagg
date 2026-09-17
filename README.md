@@ -87,13 +87,32 @@ The default output is `docs/benchmarks/latest/index.html` with a companion
 that directory. A later static documentation site can embed the report from
 `latest/index.html` without rerunning the expensive benchmark in CI.
 
+## Maintenance automation
+
+The repository has scheduled maintenance workflows for moving toolchains and
+support policies:
+
+- [`mojo-watch.yml`](.github/workflows/mojo-watch.yml) detects new Modular
+  MAX releases, validates a toolchain update, and opens a draft PR with
+  release-note signals for possible GUFunc and kernel refactors.
+- [`python-support-watch.yml`](.github/workflows/python-support-watch.yml)
+  detects stable CPython releases and NumPy's minimum Python requirement, then
+  opens a draft PR that keeps Pixi, CI, release metadata, and the lockfile in
+  sync.
+- [`pr-review.yml`](.github/workflows/pr-review.yml) reviews pull request
+  diffs for missing parity tests, benchmark evidence, stale lockfiles, hidden
+  copies or casts, and unsafe workflow changes. It does not execute code from
+  fork pull requests.
+
+Dependabot continues to maintain Python dependencies and GitHub Actions.
+
 ## Install
 
 ```bash
 pip install mojagg
 ```
 
-Prebuilt wheels for Linux x86_64/aarch64 and macOS arm64. Python ≥ 3.11, NumPy ≥ 2.0. No Mojo toolchain needed — kernels ship compiled.
+Prebuilt wheels for Linux x86_64/aarch64 and macOS arm64. Python ≥ 3.10, NumPy ≥ 2.0. No Mojo toolchain needed — kernels ship compiled.
 
 ## Functions
 
