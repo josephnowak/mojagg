@@ -1,5 +1,7 @@
 # mojagg
 
+[![CodSpeed](https://img.shields.io/endpoint?url=https://codspeed.io/badge.json)](https://app.codspeed.io/josephnowak/mojagg?utm_source=badge)
+
 ## Development workflow
 
 Development on Windows always runs through Ubuntu WSL. Use the single wrapper
@@ -54,11 +56,39 @@ Run `powershell.exe -NoProfile -ExecutionPolicy Bypass -File scripts/mojagg.ps1 
 
 ## Performance measurement
 
-The repository keeps two separate performance paths. The small
-`benchmarks/codspeed/` suite runs on trusted pushes and pull requests through
-[CodSpeed](https://codspeed.io). It covers representative reduction, groupby,
-matrix, rolling, exponential, and fill paths with moderate deterministic
-inputs, so it can detect regressions without running the publication matrix.
+The repository keeps two separate performance paths. The `benchmarks/codspeed/`
+suite runs on trusted pushes and pull requests through
+[CodSpeed](https://codspeed.io). It covers every public family — reductions,
+grouped reductions, trailing and exponentially weighted windows, matrix
+reductions, fill, and quantile selection — with moderate deterministic inputs,
+so it can detect regressions without running the publication matrix.
+
+Coverage is one benchmark per operation and workload, so a regression is
+attributed to a single kernel and a single input layout:
+
+| File | What it measures |
+|---|---|
+| `test_hot_paths.py` | the original representative hot paths, kept stable |
+| `test_reductions.py` | every reduction on the contiguous, strided and full-collapse layouts, plus the float32 and int64 kernels |
+| `test_grouped.py` | every grouped reduction at cache-resident and out-of-cache cardinality, covering both label dtypes |
+| `test_moving.py` | trailing windows (short and long) and the exponentially weighted kernels, unary and pairwise |
+| `test_matrix.py` | static, trailing and exponentially weighted pairwise matrices |
+| `test_fill_selection.py` | `ffill`/`bfill` along both layouts, and the quantile selection path |
+
+Measurements use CodSpeed's CPU simulation instrument, which counts simulated
+CPU work instead of wall time, so results do not depend on runner noise.
+Inputs stay in the low-megabyte range on purpose: instrumented execution is
+much slower than native, and a larger array makes the per-change run longer
+without changing the signal. Run the suite locally with:
+
+```bash
+pixi run pytest benchmarks/codspeed -q   # execute the suite once, no measurement
+pixi run bench-codspeed                  # local wall-time measurement (minutes)
+codspeed run --mode simulation -- pixi run pytest benchmarks/codspeed --codspeed -q
+```
+
+Only the last command reproduces what CI reports; the CPU simulation instrument
+needs the `codspeed` CLI (or the GitHub action) to record.
 
 The manual comparison in `benchmarks/public_benchmark.py` is intended for an
 occasional AWS run. It compares mojagg with numbagg and available pandas

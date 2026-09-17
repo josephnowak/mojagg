@@ -28,5 +28,37 @@ python benchmarks/public_benchmark.py \
 ```
 
 `codspeed/` is intentionally separate. It contains only moderate deterministic
-hot paths for release-to-release regression tracking and is the suite used by
-`.github/workflows/codspeed.yml`.
+inputs, is the suite used by `.github/workflows/codspeed.yml`, and runs on
+every trusted push and pull request through CodSpeed's CPU simulation
+instrument.
+
+It covers each public family with one benchmark per operation and workload:
+
+- `test_hot_paths.py` — the original representative paths, kept unchanged so
+  their CodSpeed history stays continuous.
+- `test_reductions.py` — every reduction on the contiguous, strided and
+  full-collapse layouts, plus the float32 and int64 kernel instantiations.
+- `test_grouped.py` — every grouped reduction at cache-resident (256) and
+  out-of-cache (4096) cardinality, covering the int32 and int64 label kernels.
+- `test_moving.py` — trailing windows with a short and a long window, and the
+  exponentially weighted kernels, unary and pairwise.
+- `test_matrix.py` — static, trailing and exponentially weighted pairwise
+  matrices.
+- `test_fill_selection.py` — `ffill`/`bfill` along the contiguous and strided
+  layouts, and the non-streaming quantile selection path.
+
+Shared inputs live in `codspeed/conftest.py`. Case names are part of the
+CodSpeed benchmark identity: renaming a case or a test starts a new history,
+so prefer adding a case over editing an existing one. Inputs stay in the low
+megabytes because instrumented execution is far slower than native and larger
+arrays lengthen every pull request without sharpening the signal; the broad
+size/dtype/NaN/cardinality matrix belongs to `public_benchmark.py`.
+
+```bash
+pixi run pytest benchmarks/codspeed -q   # execute the suite once, no measurement
+pixi run bench-codspeed                  # local wall-time measurement (minutes)
+codspeed run --mode simulation -- pixi run pytest benchmarks/codspeed --codspeed -q
+```
+
+The last command is the one CI runs: the CPU simulation instrument only
+records under the `codspeed` CLI or the GitHub action.
