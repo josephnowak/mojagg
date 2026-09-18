@@ -6,7 +6,8 @@ written directly to the caller's contiguous output tensor.
 """
 
 from std.builtin.sort import partition, sort
-from std.collections import InlineArray, Span
+from std.collections import Span
+from std.collections import Array
 from std.math import isinf, isnan, min
 from std.memory import alloc, dealloc
 from std.memory.alloc import Allocation, Layout
@@ -53,10 +54,10 @@ def partition_kth[
 ](span: Span[Scalar[dtype], origin], k: Int):
     """Partition a span around one requested order statistic."""
 
-    def cmp(x: Scalar[dtype], y: Scalar[dtype]) capturing -> Bool:
+    def cmp(x: Scalar[dtype], y: Scalar[dtype]) -> Bool:
         return x < y
 
-    partition[cmp_fn=cmp](span, k)
+    partition(span, k, cmp)
 
 
 @always_inline
@@ -138,7 +139,7 @@ def multi_select[
     if index_count == 0 or valid_count <= 1:
         return
 
-    var stack = InlineArray[Int, 4 * SELECT_STACK_SLOTS](fill=0)
+    var stack = Array[Int, 4 * SELECT_STACK_SLOTS](fill=0)
     var depth = 0
 
     @always_inline

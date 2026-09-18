@@ -1,5 +1,7 @@
 """Shared value-only CPU scheduling policy."""
 
+from std.sys.info import num_logical_cores
+
 
 @fieldwise_init
 struct DispatchPolicy(Copyable):
@@ -9,7 +11,9 @@ struct DispatchPolicy(Copyable):
 
     @always_inline
     def effective_workers(self, outer_count: Int, inner_length: Int) -> Int:
-        var requested = self.workers if self.workers > 0 else 16
+        var requested = (
+            self.workers if self.workers > 0 else num_logical_cores()
+        )
         if outer_count <= 1 or requested <= 1:
             return 1
         # Parallel dispatch has two independent, inclusive gates: enough outer

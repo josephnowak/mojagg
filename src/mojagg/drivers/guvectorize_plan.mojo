@@ -13,7 +13,7 @@ the requested logical order. Writable cores are rejected at plan time when
 they cannot be consumed as a direct contiguous span.
 """
 
-from std.collections import InlineArray
+from std.collections import Array
 
 from mojagg.drivers.guvectorize_layout import (
     DimArray,
@@ -48,14 +48,12 @@ struct GUVectorizePlan[NUM_TENSORS: Int](Copyable):
     var outer_rank: Int
     var outer_count: Int
     var outer_shape: DimArray
-    var operands: InlineArray[OperandPlan, Self.NUM_TENSORS]
+    var operands: Array[OperandPlan, Self.NUM_TENSORS]
 
     @staticmethod
     def resolve_broadcast[
         *Args: AnyGUTensor,
-    ](
-        plans: InlineArray[OperandPlan, Self.NUM_TENSORS],
-    ) raises -> BroadcastDomain:
+    ](plans: Array[OperandPlan, Self.NUM_TENSORS],) raises -> BroadcastDomain:
         """Resolve only input outer shapes using right-aligned broadcasting.
 
         Outputs are deliberately excluded here. They are checked against the
@@ -133,7 +131,7 @@ struct GUVectorizePlan[NUM_TENSORS: Int](Copyable):
         plan.outer_rank = rank - core_rank
         plan.core_length = 1
         plan.outer_count = 1
-        var selected = InlineArray[Bool, MAX_RANK](fill=False)
+        var selected = Array[Bool, MAX_RANK](fill=False)
         for axis in range(rank):
             plan.shape[axis] = tensor.shape[axis]
             plan.stride[axis] = tensor.stride[axis]
@@ -195,7 +193,7 @@ struct GUVectorizePlan[NUM_TENSORS: Int](Copyable):
         if Args[0].is_output:
             raise Error("the first tensor must be a read input")
 
-        var plans = InlineArray[OperandPlan, Self.NUM_TENSORS](
+        var plans = Array[OperandPlan, Self.NUM_TENSORS](
             fill=OperandPlan.empty()
         )
         comptime for i in range(Self.NUM_TENSORS):
@@ -257,11 +255,11 @@ struct CoreBindings(Copyable):
     """Runtime values resolved for symbolic core dimensions."""
 
     var values: DimArray
-    var bound: InlineArray[Bool, MAX_RANK]
+    var bound: Array[Bool, MAX_RANK]
 
     @staticmethod
     def empty() -> Self:
-        return Self(DimArray(fill=0), InlineArray[Bool, MAX_RANK](fill=False))
+        return Self(DimArray(fill=0), Array[Bool, MAX_RANK](fill=False))
 
     @always_inline
     def bind(mut self, symbol: Int, extent: Int) raises:
@@ -340,7 +338,7 @@ def _build_signature_plan[
     ), "tensor tuple does not match the kernel signature"
     comptime assert len(Args) > 1, "a gufunc needs an input and an output"
 
-    var plans = InlineArray[OperandPlan, len(Args)](fill=OperandPlan.empty())
+    var plans = Array[OperandPlan, len(Args)](fill=OperandPlan.empty())
     var empty_output_axes = AxisSpec.empty()
 
     # Build plans for bound inputs first. Outputs are unbound templates and
@@ -414,7 +412,7 @@ def _build_signature_plan[
                 raise Error("output rank exceeds guvectorize capacity")
 
             var output_shape = DimArray(fill=1)
-            var selected = InlineArray[Bool, MAX_RANK](fill=False)
+            var selected = Array[Bool, MAX_RANK](fill=False)
             for core_axis in range(physical_core_rank):
                 var axis = output_axes[core_axis]
                 if axis < 0 or axis >= output_rank or selected[axis]:

@@ -7,11 +7,11 @@ decide whether a read core needs scratch without consulting Python or walking
 dynamic collections.
 """
 
-from std.collections import InlineArray
+from std.collections import Array
 
 
 comptime MAX_RANK = 8
-comptime DimArray = InlineArray[Int, MAX_RANK]
+comptime DimArray = Array[Int, MAX_RANK]
 
 
 @fieldwise_init
