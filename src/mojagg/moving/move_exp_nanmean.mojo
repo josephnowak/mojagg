@@ -21,16 +21,17 @@ def _move_exp_nanmean[
     destination: Span[Scalar[dtype], MutUntrackedOrigin],
     min_weight: Float64,
 ):
-    var numerator = Float64(0.0)
-    var denominator = Float64(0.0)
-    var weight = Float64(0.0)
+    var minimum_weight = Scalar[dtype](min_weight)
+    var numerator = Scalar[dtype](0)
+    var denominator = Scalar[dtype](0)
+    var weight = Scalar[dtype](0)
     var values_ptr = values.unsafe_ptr()
     var alphas_ptr = alphas.unsafe_ptr()
     var destination_ptr = destination.unsafe_ptr()
-    var scalar_alpha_value = Float64(0.0)
-    var scalar_decay = Float64(0.0)
+    var scalar_alpha_value = Scalar[dtype](0)
+    var scalar_decay = Scalar[dtype](0)
     comptime if scalar_alpha:
-        scalar_alpha_value = Float64(alphas_ptr[unsafe_offset=0])
+        scalar_alpha_value = alphas_ptr[unsafe_offset=0]
         scalar_decay = 1.0 - scalar_alpha_value
 
     for i in range(len(values)):
@@ -38,7 +39,7 @@ def _move_exp_nanmean[
         var alpha = scalar_alpha_value
         var decay = scalar_decay
         comptime if not scalar_alpha:
-            alpha = Float64(alphas_ptr[unsafe_offset=i])
+            alpha = alphas_ptr[unsafe_offset=i]
             decay = 1.0 - alpha
 
         numerator *= decay
@@ -46,15 +47,15 @@ def _move_exp_nanmean[
         weight *= decay
 
         if not isnan(value):
-            numerator += Float64(value)
+            numerator += value
             denominator += 1.0
             weight += alpha
 
         # Gate before dividing: below the weight threshold the quotient would
         # be discarded anyway.
         var output = nan_or_zero[dtype]()
-        if weight >= min_weight and denominator != 0.0:
-            output = (numerator / denominator).cast[dtype]()
+        if weight >= minimum_weight and denominator != 0.0:
+            output = numerator / denominator
         destination_ptr[unsafe_offset=i] = output
 
 

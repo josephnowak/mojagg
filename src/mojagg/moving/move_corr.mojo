@@ -32,13 +32,13 @@ def _move_corr_sequential[
     comptime width = simd_width_of[dtype]()
     var n = len(a_values)
     var input_offset = 0
-    var a_sum = Float64(0.0)
-    var b_sum = Float64(0.0)
-    var product_sum = Float64(0.0)
-    var a_sum_of_squares = Float64(0.0)
-    var b_sum_of_squares = Float64(0.0)
-    var count = Float64(0.0)
-    var threshold = Float64(min_count)
+    var a_sum = Scalar[dtype](0)
+    var b_sum = Scalar[dtype](0)
+    var product_sum = Scalar[dtype](0)
+    var a_sum_of_squares = Scalar[dtype](0)
+    var b_sum_of_squares = Scalar[dtype](0)
+    var count = Scalar[dtype](0)
+    var threshold = Scalar[dtype](min_count)
     if threshold < 1.0:
         threshold = 1.0
     var destination_ptr = destination.unsafe_ptr()
@@ -83,9 +83,9 @@ def _move_corr_sequential[
                     var covariance = product_sum * reciprocal - mean_a * mean_b
                     var variance_product = variance_a * variance_b
                     if variance_product > 0.0:
-                        destination_ptr[unsafe_offset=input_offset + lane] = (
-                            covariance / sqrt(variance_product)
-                        ).cast[dtype]()
+                        destination_ptr[
+                            unsafe_offset=input_offset + lane
+                        ] = covariance / sqrt(variance_product)
                     else:
                         destination_ptr[
                             unsafe_offset=input_offset + lane

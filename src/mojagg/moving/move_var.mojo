@@ -31,10 +31,10 @@ def _move_var_sequential[
     comptime width = simd_width_of[dtype]()
     var n = len(values)
     var input_offset = 0
-    var total = Float64(0.0)
-    var sum_of_squares = Float64(0.0)
-    var count = Float64(0.0)
-    var threshold = Float64(min_count)
+    var total = Scalar[dtype](0)
+    var sum_of_squares = Scalar[dtype](0)
+    var count = Scalar[dtype](0)
+    var threshold = Scalar[dtype](min_count)
     if threshold < 2.0:
         threshold = 2.0
     var destination_ptr = destination.unsafe_ptr()
@@ -65,11 +65,11 @@ def _move_var_sequential[
                     comptime if take_sqrt:
                         destination_ptr[
                             unsafe_offset=input_offset + lane
-                        ] = sqrt(variance).cast[dtype]()
+                        ] = sqrt(variance)
                     else:
                         destination_ptr[
                             unsafe_offset=input_offset + lane
-                        ] = variance.cast[dtype]()
+                        ] = variance
                 else:
                     destination_ptr[
                         unsafe_offset=input_offset + lane

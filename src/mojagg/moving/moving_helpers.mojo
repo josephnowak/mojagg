@@ -36,8 +36,8 @@ struct MaskedBlock[dtype: DType, width: Int](ImplicitlyCopyable):
     """
 
     var native: SIMD[Self.dtype, Self.width]
-    var values: SIMD[DType.float64, Self.width]
-    var counts: SIMD[DType.float64, Self.width]
+    var values: SIMD[Self.dtype, Self.width]
+    var counts: SIMD[Self.dtype, Self.width]
 
     @always_inline
     @staticmethod
@@ -45,8 +45,8 @@ struct MaskedBlock[dtype: DType, width: Int](ImplicitlyCopyable):
         """Return the neutral block used before the window is full."""
         return Self(
             SIMD[Self.dtype, Self.width](0),
-            SIMD[DType.float64, Self.width](0.0),
-            SIMD[DType.float64, Self.width](0.0),
+            SIMD[Self.dtype, Self.width](0),
+            SIMD[Self.dtype, Self.width](0),
         )
 
     @always_inline
@@ -59,22 +59,22 @@ struct MaskedBlock[dtype: DType, width: Int](ImplicitlyCopyable):
         var native = missing.select(SIMD[Self.dtype, Self.width](0), block)
         return Self(
             native,
-            native.cast[DType.float64](),
+            native,
             missing.select(
-                SIMD[DType.float64, Self.width](0.0),
-                SIMD[DType.float64, Self.width](1.0),
+                SIMD[Self.dtype, Self.width](0),
+                SIMD[Self.dtype, Self.width](1),
             ),
         )
 
     @always_inline
-    def squares(self) -> SIMD[DType.float64, Self.width]:
+    def squares(self) -> SIMD[Self.dtype, Self.width]:
         """Lane squares, multiplied in the input dtype like the scalar path."""
-        return (self.native * self.native).cast[DType.float64]()
+        return self.native * self.native
 
     @always_inline
-    def products(self, other: Self) -> SIMD[DType.float64, Self.width]:
+    def products(self, other: Self) -> SIMD[Self.dtype, Self.width]:
         """Lane products of two blocks that already share one NaN mask."""
-        return (self.native * other.native).cast[DType.float64]()
+        return self.native * other.native
 
 
 @always_inline

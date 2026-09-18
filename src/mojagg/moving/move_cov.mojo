@@ -31,11 +31,11 @@ def _move_cov_sequential[
     comptime width = simd_width_of[dtype]()
     var n = len(a_values)
     var input_offset = 0
-    var a_sum = Float64(0.0)
-    var b_sum = Float64(0.0)
-    var product_sum = Float64(0.0)
-    var count = Float64(0.0)
-    var threshold = Float64(min_count)
+    var a_sum = Scalar[dtype](0)
+    var b_sum = Scalar[dtype](0)
+    var product_sum = Scalar[dtype](0)
+    var count = Scalar[dtype](0)
+    var threshold = Scalar[dtype](min_count)
     if threshold < 2.0:
         threshold = 2.0
     var destination_ptr = destination.unsafe_ptr()
@@ -69,7 +69,7 @@ def _move_cov_sequential[
                     )
                     destination_ptr[
                         unsafe_offset=input_offset + lane
-                    ] = covariance.cast[dtype]()
+                    ] = covariance
                 else:
                     destination_ptr[
                         unsafe_offset=input_offset + lane

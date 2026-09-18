@@ -2883,18 +2883,35 @@ function barChart(rows){
 }
 
 function scatterChart(rows){
-  const points=rows.filter(r=>r.implementation==='numbagg'&&r.status==='ok'&&r.time_ratio!=null&&r.memory_ratio!=null);
+  const points=rows.filter(r=>r.implementation==='numbagg'&&r.status==='ok'&&r.time_ratio>0&&r.memory_ratio>0);
   if(!points.length)return'<div class="empty">No comparable time/memory points for this filter.</div>';
-  const width=700,height=340,left=58,right=20,top=20,bottom=45;
-  const maxX=Math.max(1.25,...points.map(r=>r.time_ratio));
-  const maxY=Math.max(1.25,...points.map(r=>r.memory_ratio));
-  const x=v=>left+(v/maxX)*(width-left-right);
-  const y=v=>(height-bottom)-(v/maxY)*(height-top-bottom);
-  let out='<svg viewBox="0 0 '+width+' '+height+'" role="img" aria-label="time and memory ratio scatter"><line x1="'+x(1)+'" x2="'+x(1)+'" y1="'+top+'" y2="'+(height-bottom)+'" stroke="#ffc857" stroke-dasharray="4 4"/><line x1="'+left+'" x2="'+(width-right)+'" y1="'+y(1)+'" y2="'+y(1)+'" stroke="#ffc857" stroke-dasharray="4 4"/><text x="'+(width/2)+'" y="'+(height-8)+'" fill="#90a9c2" text-anchor="middle" font-size="11">time ratio vs mojagg →</text><text x="13" y="'+(height/2)+'" fill="#90a9c2" text-anchor="middle" font-size="11" transform="rotate(-90 13 '+(height/2)+')">memory ratio ↑</text>';
-  for(const point of points){
-    out+='<circle cx="'+x(point.time_ratio)+'" cy="'+y(point.memory_ratio)+'" r="5" fill="'+COLORS[point.implementation]+'"><title>'+esc(point.implementation)+' · '+esc(point.function)+' · '+esc(point.case)+' · time '+fmtRatio(point.time_ratio)+' · memory '+fmtRatio(point.memory_ratio)+'</title></circle>';
+  const width=700,height=390,left=66,right=22,top=30,bottom=58;
+  const values=points.flatMap(r=>[r.time_ratio,r.memory_ratio]);
+  const minValue=Math.max(.1,Math.min(.5,...values)*.8);
+  const maxValue=Math.max(2,Math.max(...values)*1.2);
+  const logMin=Math.log10(minValue),logMax=Math.log10(maxValue),logSpan=logMax-logMin;
+  const x=v=>left+((Math.log10(v)-logMin)/logSpan)*(width-left-right);
+  const y=v=>(height-bottom)-((Math.log10(v)-logMin)/logSpan)*(height-top-bottom);
+  const ticks=[];
+  for(let exponent=Math.floor(logMin);exponent<=Math.ceil(logMax);exponent++){
+    for(const multiplier of [1,2,5]){
+      const value=multiplier*Math.pow(10,exponent);
+      if(value>=minValue*.999&&value<=maxValue*1.001)ticks.push(value);
+    }
   }
-  out+='</svg><div class="memory-callout"><strong>Memory Note:</strong> Mojagg and numbagg execute zero-copy compiled kernels with minimal Python-heap overhead (0–3 KiB, ratio ≈ 1.00×).</div>';
+  const tickLabel=value=>value>=10?value.toFixed(0)+'×':value>=1?value.toFixed(1)+'×':value.toFixed(2)+'×';
+  let grid='';
+  for(const tick of ticks){
+    const tickX=x(tick),tickY=y(tick),major=Math.abs(Math.log10(tick)-Math.round(Math.log10(tick)))<.001;
+    grid+='<line x1="'+tickX+'" x2="'+tickX+'" y1="'+top+'" y2="'+(height-bottom)+'" stroke="rgba(38,68,95,'+(major?.55:.32)+')" stroke-dasharray="'+(major?'4 4':'2 5')+'"/><line x1="'+left+'" x2="'+(width-right)+'" y1="'+tickY+'" y2="'+tickY+'" stroke="rgba(38,68,95,'+(major?.55:.32)+')" stroke-dasharray="'+(major?'4 4':'2 5')+'"/><text x="'+tickX+'" y="'+(height-bottom+18)+'" fill="#90a9c2" font-size="9" text-anchor="middle">'+tickLabel(tick)+'</text><text x="'+(left-8)+'" y="'+(tickY+3)+'" fill="#90a9c2" font-size="9" text-anchor="end">'+tickLabel(tick)+'</text>';
+  }
+  const quadrantColor=(time,memory)=>time<1&&memory<1?'#55e6bd':time<1?'#6da8ff':memory<1?'#ffc857':'#ef8b87';
+  let out='<svg viewBox="0 0 '+width+' '+height+'" style="width:100%;height:auto;min-width:520px" role="img" aria-label="Logarithmic time and memory ratio quadrant chart">'+grid+'<rect x="'+left+'" y="'+top+'" width="'+(x(1)-left)+'" height="'+(y(1)-top)+'" fill="rgba(109,168,255,.045)"/><rect x="'+x(1)+'" y="'+top+'" width="'+(width-right-x(1))+'" height="'+(y(1)-top)+'" fill="rgba(239,139,135,.045)"/><rect x="'+left+'" y="'+y(1)+'" width="'+(x(1)-left)+'" height="'+(height-bottom-y(1))+'" fill="rgba(85,230,189,.045)"/><rect x="'+x(1)+'" y="'+y(1)+'" width="'+(width-right-x(1))+'" height="'+(height-bottom-y(1))+'" fill="rgba(255,200,87,.045)"/><line x1="'+x(1)+'" x2="'+x(1)+'" y1="'+top+'" y2="'+(height-bottom)+'" stroke="#d5e6df" stroke-width="1.5" stroke-dasharray="6 5"/><line x1="'+left+'" x2="'+(width-right)+'" y1="'+y(1)+'" y2="'+y(1)+'" stroke="#d5e6df" stroke-width="1.5" stroke-dasharray="6 5"/><text x="'+(left+8)+'" y="'+(top+14)+'" fill="#6da8ff" font-size="10" font-weight="700">LOWER TIME</text><text x="'+(width-right-8)+'" y="'+(top+14)+'" fill="#ef8b87" font-size="10" text-anchor="end" font-weight="700">HIGHER BOTH</text><text x="'+(left+8)+'" y="'+(height-bottom-8)+'" fill="#55e6bd" font-size="10" font-weight="700">LOWER BOTH</text><text x="'+(width-right-8)+'" y="'+(height-bottom-8)+'" fill="#ffc857" font-size="10" text-anchor="end" font-weight="700">LOWER MEMORY</text><text x="'+(width/2)+'" y="'+(height-10)+'" fill="#90a9c2" text-anchor="middle" font-size="11">numbagg / mojagg time ratio · lower is better</text><text x="14" y="'+(height/2)+'" fill="#90a9c2" text-anchor="middle" font-size="11" transform="rotate(-90 14 '+(height/2)+')">numbagg / mojagg memory ratio · lower is better</text>';
+  for(const point of points){
+    const color=quadrantColor(point.time_ratio,point.memory_ratio);
+    out+='<circle cx="'+x(point.time_ratio)+'" cy="'+y(point.memory_ratio)+'" r="5.5" fill="'+color+'" fill-opacity=".82" stroke="#d8fff2" stroke-opacity=".7"><title>'+esc(point.function)+' · '+esc(point.case)+' · time '+fmtRatio(point.time_ratio)+' · memory '+fmtRatio(point.memory_ratio)+'</title></circle>';
+  }
+  out+='</svg><div class="legend" style="justify-content:center;margin-top:4px"><span><i class="dot" style="background:#55e6bd"></i>lower time &amp; memory</span><span><i class="dot" style="background:#6da8ff"></i>lower time, higher memory</span><span><i class="dot" style="background:#ffc857"></i>higher time, lower memory</span><span><i class="dot" style="background:#ef8b87"></i>higher both</span></div><div class="memory-callout"><strong>How to read it:</strong> Each point is numbagg relative to mojagg. Both axes use logarithmic scales, the dashed crosshair is 1.00× parity, and hover a point for its operation and exact ratios. Lower memory is toward the bottom.</div>';
   return out;
 }
 
@@ -2949,7 +2966,7 @@ function renderSections(){
     const functions=[...new Set(all.map(r=>r.function))];
     const chips=functions.map(fn=>'<label class="chip" data-fn="'+esc(fn)+'"><input class="function-check" data-section="'+esc(section)+'" value="'+esc(fn)+'" type="checkbox" checked> <span>'+esc(fn)+'</span><button type="button" class="chip-only" title="Show only '+esc(fn)+'" data-only-sec="'+esc(section)+'" data-only-fn="'+esc(fn)+'">only</button></label>').join('');
 
-    root.insertAdjacentHTML('beforeend','<section class="section-panel" id="section-'+esc(section)+'" data-panel="'+esc(section)+'"><div class="section-head"><div><div class="eyebrow">'+esc(section)+'</div><h2>'+esc(sectionTitles[section])+'</h2><p>'+esc(sectionDescriptions[section])+'</p></div><div class="section-filter-box"><div class="section-filter-top"><input class="func-search" data-search-sec="'+esc(section)+'" type="search" placeholder="Filter algorithms (e.g. sum, min)..."><div class="func-count-badge" data-count="'+esc(section)+'">'+functions.length+' algorithms</div></div><div class="chips" data-chips-sec="'+esc(section)+'">'+chips+'</div></div></div><div class="section-actions"><button data-all="'+esc(section)+'">Select all</button><button data-none="'+esc(section)+'">Clear</button><button data-invert="'+esc(section)+'">Invert</button></div><div class="visual-grid"><div class="card"><h3>Time ratio</h3><p>Bars are implementation time divided by mojagg. Shorter is faster.</p><div class="chart" data-chart="'+esc(section)+'"></div><div class="legend">'+implementations.map(i=>'<span><i class="dot" style="background:'+COLORS[i]+'"></i>'+i+'</span>').join('')+'</div></div><div class="card"><h3>Time / memory map</h3><p>Lower-left means less time and less tracked allocation than mojagg.</p><div class="chart scatter" data-scatter="'+esc(section)+'"></div></div></div><div class="card" style="margin-top:14px"><h3>Ratio heatmap</h3><p>Green is below mojagg; pink is above it. N/A means that adapter is unavailable.</p><div class="heatmap" data-heatmap="'+esc(section)+'"></div></div><div class="table-wrap"><div data-table="'+esc(section)+'"></div></div></section>');
+    root.insertAdjacentHTML('beforeend','<section class="section-panel" id="section-'+esc(section)+'" data-panel="'+esc(section)+'"><div class="section-head"><div><div class="eyebrow">'+esc(section)+'</div><h2>'+esc(sectionTitles[section])+'</h2><p>'+esc(sectionDescriptions[section])+'</p></div><div class="section-filter-box"><div class="section-filter-top"><input class="func-search" data-search-sec="'+esc(section)+'" type="search" placeholder="Filter algorithms (e.g. sum, min)..."><div class="func-count-badge" data-count="'+esc(section)+'">'+functions.length+' algorithms</div></div><div class="chips" data-chips-sec="'+esc(section)+'">'+chips+'</div></div></div><div class="section-actions"><button data-all="'+esc(section)+'">Select all</button><button data-none="'+esc(section)+'">Clear</button><button data-invert="'+esc(section)+'">Invert</button></div><div class="visual-grid"><div class="card"><h3>Time ratio</h3><p>Bars are implementation time divided by mojagg. Shorter is faster.</p><div class="chart" data-chart="'+esc(section)+'"></div><div class="legend">'+implementations.map(i=>'<span><i class="dot" style="background:'+COLORS[i]+'"></i>'+i+'</span>').join('')+'</div></div><div class="card"><h3>Time / memory quadrants</h3><p>Logarithmic ratios keep small memory differences readable; each point compares numbagg with mojagg.</p><div class="chart scatter" data-scatter="'+esc(section)+'"></div></div></div><div class="card" style="margin-top:14px"><h3>Ratio heatmap</h3><p>Green is below mojagg; pink is above it. N/A means that adapter is unavailable.</p><div class="heatmap" data-heatmap="'+esc(section)+'"></div></div><div class="table-wrap"><div data-table="'+esc(section)+'"></div></div></section>');
   }
 
   for(const button of $$('[data-all]')){

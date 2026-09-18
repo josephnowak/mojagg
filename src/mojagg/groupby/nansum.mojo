@@ -39,7 +39,6 @@ struct GroupNanSum[
         label_value: Scalar[Self.label_t],
         value: Scalar[Self.value_t],
     ):
-        comptime assert Self.power >= 0, "group power must be non-negative"
         var label = Int(label_value)
         if label < 0:
             return

@@ -17,19 +17,17 @@ from mojagg.drivers.guvectorize import (
 @always_inline
 def nan_mean_contiguous[
     dtype: DType
-](values: Span[Scalar[dtype], ImmUntrackedOrigin]) -> Tuple[Float64, Int64]:
-    """Accumulate a contiguous core with float64 SIMD sum and count."""
+](values: Span[Scalar[dtype], ImmUntrackedOrigin]) -> Tuple[
+    Scalar[dtype], Scalar[dtype]
+]:
+    """Accumulate a contiguous core with dtype-native SIMD sum and count."""
 
-    comptime assert (
-        dtype == DType.float32 or dtype == DType.float64
-    ), "nanmean requires float32 or float64"
-
-    comptime width = simd_width_of[dtype]() * 8
+    comptime width = simd_width_of[dtype]() * 4
     var pointer = values.unsafe_ptr()
-    var total = SIMD[DType.float64, width](0.0)
-    var count = SIMD[DType.float64, width](0.0)
-    var zero = SIMD[DType.float64, width](0.0)
-    var one = SIMD[DType.float64, width](1.0)
+    var total = SIMD[dtype, width](0.0)
+    var count = SIMD[dtype, width](0.0)
+    var zero = SIMD[dtype, width](0.0)
+    var one = SIMD[dtype, width](1.0)
 
     def step[
         vector_width: Int
@@ -37,18 +35,17 @@ def nan_mean_contiguous[
         var block = load_block_or_identity[dtype, width](
             pointer, i, evl, nan_or_zero[dtype]()
         )
-        var widened = block.cast[DType.float64]()
         var missing = isnan(block)
-        total += missing.select(zero, widened)
+        total += missing.select(zero, block)
         count += missing.select(zero, one)
 
     vectorize[width](len(values), step)
-    return (Float64(total.reduce_add()), Int64(count.reduce_add()))
+    return (total.reduce_add(), count.reduce_add())
 
 
 @fieldwise_init
 struct NanMean[dtype: DType](GUFuncKernel, ImplicitlyCopyable):
-    """Accumulate in float64 and write the result in the requested dtype."""
+    """Accumulate and write the result in the requested dtype."""
 
     comptime value_dtype = Self.dtype
     comptime out_dtype = Self.dtype
@@ -67,4 +64,4 @@ struct NanMean[dtype: DType](GUFuncKernel, ImplicitlyCopyable):
         if count == 0:
             output.write_span()[0] = nan_or_zero[Self.dtype]()
         else:
-            output.write_span()[0] = (total / Float64(count)).cast[Self.dtype]()
+            output.write_span()[0] = total / count

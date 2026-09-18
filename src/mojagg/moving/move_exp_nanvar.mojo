@@ -21,18 +21,19 @@ def _move_exp_nanvar[
     destination: Span[Scalar[dtype], MutUntrackedOrigin],
     min_weight: Float64,
 ):
-    var sum_x_2 = Float64(0.0)
-    var sum_x = Float64(0.0)
-    var sum_weight = Float64(0.0)
-    var sum_weight_2 = Float64(0.0)
-    var weight = Float64(0.0)
+    var minimum_weight = Scalar[dtype](min_weight)
+    var sum_x_2 = Scalar[dtype](0)
+    var sum_x = Scalar[dtype](0)
+    var sum_weight = Scalar[dtype](0)
+    var sum_weight_2 = Scalar[dtype](0)
+    var weight = Scalar[dtype](0)
     var values_ptr = values.unsafe_ptr()
     var alphas_ptr = alphas.unsafe_ptr()
     var destination_ptr = destination.unsafe_ptr()
-    var scalar_alpha_value = Float64(0.0)
-    var scalar_decay = Float64(0.0)
+    var scalar_alpha_value = Scalar[dtype](0)
+    var scalar_decay = Scalar[dtype](0)
     comptime if scalar_alpha:
-        scalar_alpha_value = Float64(alphas_ptr[unsafe_offset=0])
+        scalar_alpha_value = alphas_ptr[unsafe_offset=0]
         scalar_decay = 1.0 - scalar_alpha_value
     var scalar_decay_squared = scalar_decay * scalar_decay
 
@@ -42,7 +43,7 @@ def _move_exp_nanvar[
         var decay = scalar_decay
         var decay_squared = scalar_decay_squared
         comptime if not scalar_alpha:
-            alpha = Float64(alphas_ptr[unsafe_offset=i])
+            alpha = alphas_ptr[unsafe_offset=i]
             decay = 1.0 - alpha
             decay_squared = decay * decay
 
@@ -53,8 +54,8 @@ def _move_exp_nanvar[
         weight *= decay
 
         if not isnan(value):
-            sum_x_2 += Float64(value * value)
-            sum_x += Float64(value)
+            sum_x_2 += value * value
+            sum_x += value
             sum_weight += 1.0
             sum_weight_2 += 1.0
             weight += alpha
@@ -62,7 +63,7 @@ def _move_exp_nanvar[
         # Gate on the cheap conditions before dividing: below the weight
         # threshold the arithmetic would be discarded anyway.
         var output = nan_or_zero[dtype]()
-        if weight >= min_weight and sum_weight != 0.0:
+        if weight >= minimum_weight and sum_weight != 0.0:
             var mean = sum_x / sum_weight
             var var_biased = sum_x_2 / sum_weight - mean * mean
             var bias = 1.0 - sum_weight_2 / (sum_weight * sum_weight)
@@ -70,7 +71,7 @@ def _move_exp_nanvar[
                 var result = var_biased / bias
                 comptime if take_sqrt:
                     result = sqrt(result)
-                output = result.cast[dtype]()
+                output = result
         destination_ptr[unsafe_offset=i] = output
 
 

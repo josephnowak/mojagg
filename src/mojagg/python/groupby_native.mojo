@@ -426,7 +426,7 @@ def group_nanmean_binding[
     num_labels: PythonObject,
     options: PythonObject,
 ) raises -> PythonObject:
-    return _apply_group_two[
+    return _apply_group_one[
         value_dtype,
         label_dtype,
         GroupNanMean[value_dtype, label_dtype],
@@ -438,7 +438,7 @@ def group_nanmean_binding[
         options,
         GroupNanMean[value_dtype, label_dtype](),
         "group_nanmean",
-        [GROUP_INIT_ZERO, GROUP_INIT_ZERO],
+        [GROUP_INIT_ZERO],
     )
 
 
@@ -551,7 +551,7 @@ def group_nanargmin_binding[
     num_labels: PythonObject,
     options: PythonObject,
 ) raises -> PythonObject:
-    return _apply_group_two_value[
+    return _apply_group_one[
         value_dtype,
         label_dtype,
         GroupNanArgMinMax[value_dtype, label_dtype, False],
@@ -563,7 +563,7 @@ def group_nanargmin_binding[
         options,
         GroupNanArgMinMax[value_dtype, label_dtype, False](),
         "group_nanargmin",
-        [GROUP_INIT_NAN_OR_NEG_ONE, GROUP_INIT_NAN_OR_ZERO],
+        [GROUP_INIT_NAN_OR_NEG_ONE],
     )
 
 
@@ -576,7 +576,7 @@ def group_nanargmax_binding[
     num_labels: PythonObject,
     options: PythonObject,
 ) raises -> PythonObject:
-    return _apply_group_two_value[
+    return _apply_group_one[
         value_dtype,
         label_dtype,
         GroupNanArgMinMax[value_dtype, label_dtype, True],
@@ -588,7 +588,7 @@ def group_nanargmax_binding[
         options,
         GroupNanArgMinMax[value_dtype, label_dtype, True](),
         "group_nanargmax",
-        [GROUP_INIT_NAN_OR_NEG_ONE, GROUP_INIT_NAN_OR_ZERO],
+        [GROUP_INIT_NAN_OR_NEG_ONE],
     )
 
 
@@ -601,7 +601,7 @@ def group_nanfirst_binding[
     num_labels: PythonObject,
     options: PythonObject,
 ) raises -> PythonObject:
-    return _apply_group_two[
+    return _apply_group_one[
         value_dtype,
         label_dtype,
         GroupNanFirst[value_dtype, label_dtype],

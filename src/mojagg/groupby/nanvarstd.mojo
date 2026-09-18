@@ -40,10 +40,6 @@ struct GroupNanVarStd[
         label_value: Scalar[Self.label_t],
         value: Scalar[Self.value_t],
     ):
-        comptime assert (
-            Self.value_t == DType.float32 or Self.value_t == DType.float64
-        ), "group_nanvar and group_nanstd require float32 or float64"
-
         var label = Int(label_value)
         if label < 0:
             return

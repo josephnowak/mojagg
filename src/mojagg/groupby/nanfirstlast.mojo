@@ -24,14 +24,12 @@ struct GroupNanFirst[
         GUTensor[Self.value_t, False, CoreSpec[Dim[0]]],
         GUTensor[Self.label_t, False, CoreSpec[Dim[0]]],
         GUTensor[Self.value_t, True, CoreSpec[Dim[1]]],
-        GUTensor[DType.int64, True, CoreSpec[Dim[1]]],
     ]
 
     @always_inline
     @staticmethod
     def _update_lane(
         destination: Pointer[mut=True, Scalar[Self.value_t], _],
-        seen: Pointer[mut=True, Scalar[DType.int64], _],
         label_value: Scalar[Self.label_t],
         value: Scalar[Self.value_t],
     ):
@@ -41,26 +39,20 @@ struct GroupNanFirst[
         comptime if Self.value_t.is_floating_point():
             if isnan(value):
                 return
-        # The zero-initialized workspace is the dtype-independent sentinel for
-        # "this group is still empty", so integers need no separate pass.
-        if Bool(seen[unsafe_offset=label] != 0):
-            return
+        # The reverse traversal makes the final store the first valid value.
         destination[unsafe_offset=label] = value
-        seen[unsafe_offset=label] = 1
 
     @always_inline
     def __call__(mut self, tensors: Self.Signature):
-        var value_input, label_input, output, seen_output = tensors
+        var value_input, label_input, output = tensors
         var values = value_input.read_span()
         var labels = label_input.read_span()
         var destination = output.write_span()
-        var seen = seen_output.write_span()
 
-        comptime width = simd_width_of[Self.value_t]() * 4
+        comptime width = simd_width_of[Self.value_t]() * 8
         var value_ptr = values.unsafe_ptr()
         var label_ptr = labels.unsafe_ptr()
         var destination_ptr = destination.unsafe_ptr()
-        var seen_ptr = seen.unsafe_ptr()
 
         def step[
             vector_width: Int
@@ -68,7 +60,6 @@ struct GroupNanFirst[
             imm value_ptr,
             imm label_ptr,
             imm destination_ptr,
-            imm seen_ptr,
         }:
             var value_block = load_block_or_identity[Self.value_t, width](
                 value_ptr, i, evl, Scalar[Self.value_t](0)
@@ -76,15 +67,23 @@ struct GroupNanFirst[
             var label_block = load_block_or_identity[Self.label_t, width](
                 label_ptr, i, evl, Scalar[Self.label_t](-1)
             )
-            comptime for lane in range(width):
-                Self._update_lane(
-                    destination_ptr,
-                    seen_ptr,
-                    label_block[lane],
-                    value_block[lane],
-                )
+            comptime for lane in range(width - 1, -1, -1):
+                if lane < evl:
+                    Self._update_lane(
+                        destination_ptr,
+                        label_block[lane],
+                        value_block[lane],
+                    )
 
-        vectorize[width](len(values), step)
+        var n = len(values)
+        var tail = n % width
+        var start = n - tail
+
+        if tail > 0:
+            step[width](start, tail)
+
+        for i in range(start - width, -1, -width):
+            step[width](i, width)
 
 
 @fieldwise_init

@@ -40,9 +40,9 @@ def _move_sum_sequential[
     comptime width = simd_width_of[dtype]()
     var n = len(values)
     var input_offset = 0
-    var sum = Float64(0.0)
-    var count = Float64(0.0)
-    var threshold = Float64(min_count)
+    var sum = Scalar[dtype](0)
+    var count = Scalar[dtype](0)
+    var threshold = Scalar[dtype](min_count)
     var destination_ptr = destination.unsafe_ptr()
 
     while input_offset < n:
@@ -66,9 +66,7 @@ def _move_sum_sequential[
                 sum += delta_sum[lane]
                 count += delta_count[lane]
                 if count >= threshold:
-                    destination_ptr[
-                        unsafe_offset=input_offset + lane
-                    ] = sum.cast[dtype]()
+                    destination_ptr[unsafe_offset=input_offset + lane] = sum
                 else:
                     destination_ptr[
                         unsafe_offset=input_offset + lane

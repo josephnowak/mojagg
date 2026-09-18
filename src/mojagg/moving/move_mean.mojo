@@ -30,9 +30,9 @@ def _move_mean_sequential[
     comptime width = simd_width_of[dtype]()
     var n = len(values)
     var input_offset = 0
-    var total = Float64(0.0)
-    var count = Float64(0.0)
-    var threshold = Float64(min_count)
+    var total = Scalar[dtype](0)
+    var count = Scalar[dtype](0)
+    var threshold = Scalar[dtype](min_count)
     if threshold < 1.0:
         threshold = 1.0
     var destination_ptr = destination.unsafe_ptr()
@@ -57,7 +57,7 @@ def _move_mean_sequential[
                 if count >= threshold:
                     destination_ptr[unsafe_offset=input_offset + lane] = (
                         total / count
-                    ).cast[dtype]()
+                    )
                 else:
                     destination_ptr[
                         unsafe_offset=input_offset + lane

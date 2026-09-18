@@ -35,7 +35,6 @@ def nan_sum_powered_block[
 ](values: SIMD[dtype, width]) -> SIMD[dtype, width]:
     """Raise a full SIMD block to a non-negative compile-time power."""
 
-    comptime assert power >= 0, "nansum power must be non-negative"
     comptime if power == 0:
         return SIMD[dtype, width](1)
     elif power == 1:

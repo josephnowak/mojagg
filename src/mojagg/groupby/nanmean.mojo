@@ -5,6 +5,7 @@ from std.math import isnan
 from std.sys.info import simd_width_of
 
 from mojagg.core.numeric import load_block_or_identity, nan_or_zero
+from mojagg.core.preallocated import Preallocated
 from mojagg.groupby.group_kernel import GroupKernel
 from mojagg.drivers.guvectorize import (
     CoreSpec,
@@ -24,8 +25,15 @@ struct GroupNanMean[
         GUTensor[Self.value_t, False, CoreSpec[Dim[0]]],
         GUTensor[Self.label_t, False, CoreSpec[Dim[0]]],
         GUTensor[Self.value_t, True, CoreSpec[Dim[1]]],
-        GUTensor[DType.int64, True, CoreSpec[Dim[1]]],
     ]
+
+    var counts: Preallocated[DType.int64]
+
+    def __init__(out self):
+        self.counts = Preallocated[DType.int64]()
+
+    def __init__(out self, *, copy: Self):
+        self.counts = Preallocated[DType.int64]()
 
     @always_inline
     @staticmethod
@@ -35,10 +43,6 @@ struct GroupNanMean[
         label_value: Scalar[Self.label_t],
         value: Scalar[Self.value_t],
     ):
-        comptime assert (
-            Self.value_t == DType.float32 or Self.value_t == DType.float64
-        ), "group_nanmean requires float32 or float64"
-
         var label = Int(label_value)
         if label < 0:
             return
@@ -49,17 +53,16 @@ struct GroupNanMean[
 
     @always_inline
     def __call__(mut self, tensors: Self.Signature):
-        var value_input, label_input, output, counts_output = tensors
+        var value_input, label_input, output = tensors
         var values = value_input.read_span()
         var labels = label_input.read_span()
         var destination = output.write_span()
-        var counts = counts_output.write_span()
+        var count_ptr = self.counts.get_ptr(len(destination), Int64(0))
 
         comptime width = simd_width_of[Self.value_t]() * 4
         var value_ptr = values.unsafe_ptr()
         var label_ptr = labels.unsafe_ptr()
         var destination_ptr = destination.unsafe_ptr()
-        var count_ptr = counts.unsafe_ptr()
 
         def step[
             vector_width: Int
