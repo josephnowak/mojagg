@@ -50,7 +50,7 @@ struct GroupNanProd[
         var destination = output.write_span()
         var destination_ptr = destination.unsafe_ptr()
 
-        comptime width = simd_width_of[Self.value_t]() * 4
+        comptime width = simd_width_of[Self.value_t]() * 8
         var value_ptr = values.unsafe_ptr()
         var label_ptr = labels.unsafe_ptr()
 

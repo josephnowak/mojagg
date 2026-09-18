@@ -49,7 +49,7 @@ struct GroupNanCount[
         var labels = label_input.read_span()
         var destination = output.write_span()
 
-        comptime width = simd_width_of[Self.value_t]() * 2
+        comptime width = simd_width_of[Self.value_t]() * 8
         var value_ptr = values.unsafe_ptr()
         var label_ptr = labels.unsafe_ptr()
         var destination_ptr = destination.unsafe_ptr()
