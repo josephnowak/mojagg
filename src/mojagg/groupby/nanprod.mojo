@@ -50,7 +50,7 @@ struct GroupNanProd[
         var destination = output.write_span()
         var destination_ptr = destination.unsafe_ptr()
 
-        comptime width = simd_width_of[Self.value_t]() * 8
+        comptime width = 2
         var value_ptr = values.unsafe_ptr()
         var label_ptr = labels.unsafe_ptr()
 
@@ -74,4 +74,4 @@ struct GroupNanProd[
                     value_block[lane],
                 )
 
-        vectorize[width](len(values), step)
+        vectorize[width, unroll_factor=8](len(values), step)

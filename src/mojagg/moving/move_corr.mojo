@@ -46,7 +46,6 @@ def _move_corr_sequential[
         var active = min(width, n - input_offset)
         if input_offset < window:
             active = min(active, window - input_offset)
-
         var entering_a, entering_b = load_masked_pair[dtype, width](
             a_values, b_values, input_offset, active
         )

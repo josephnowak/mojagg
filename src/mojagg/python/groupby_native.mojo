@@ -358,7 +358,7 @@ def _apply_group_three[
     op_name: String,
     initializers: List[Int],
 ) raises -> PythonObject:
-    """Build and execute a grouped signature with two workspaces."""
+    """Build and execute a grouped signature with two value outputs."""
 
     validate_dtype[value_dtype](values, op_name)
     validate_dtype[label_dtype](labels, op_name + " labels")
@@ -377,7 +377,6 @@ def _apply_group_three[
         labels_tensor,
         GUTensor[value_dtype, True, CoreSpec[Dim[1]]].empty(),
         GUTensor[value_dtype, True, CoreSpec[Dim[1]]].empty(),
-        GUTensor[DType.int64, True, CoreSpec[Dim[1]]].empty(),
     )
     return _execute_group[Op](
         values,
@@ -702,7 +701,7 @@ def group_nanvar_binding[
     options: PythonObject,
 ) raises -> PythonObject:
     var ddof = Int(py=options[1])
-    return _apply_group_three[
+    return _apply_group_one[
         value_dtype,
         label_dtype,
         GroupNanVarStd[value_dtype, label_dtype, False],
@@ -714,7 +713,7 @@ def group_nanvar_binding[
         options,
         GroupNanVarStd[value_dtype, label_dtype, False](ddof),
         "group_nanvar",
-        [GROUP_INIT_ZERO, GROUP_INIT_ZERO, GROUP_INIT_ZERO],
+        [GROUP_INIT_ZERO],
     )
 
 
@@ -728,7 +727,7 @@ def group_nanstd_binding[
     options: PythonObject,
 ) raises -> PythonObject:
     var ddof = Int(py=options[1])
-    return _apply_group_three[
+    return _apply_group_one[
         value_dtype,
         label_dtype,
         GroupNanVarStd[value_dtype, label_dtype, True],
@@ -740,7 +739,7 @@ def group_nanstd_binding[
         options,
         GroupNanVarStd[value_dtype, label_dtype, True](ddof),
         "group_nanstd",
-        [GROUP_INIT_ZERO, GROUP_INIT_ZERO, GROUP_INIT_ZERO],
+        [GROUP_INIT_ZERO],
     )
 
 

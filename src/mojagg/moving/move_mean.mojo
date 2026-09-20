@@ -40,7 +40,6 @@ def _move_mean_sequential[
         var active = min(width, n - input_offset)
         if input_offset < window:
             active = min(active, window - input_offset)
-
         var entering = load_masked_block[dtype, width](
             values, input_offset, active
         )
@@ -49,7 +48,6 @@ def _move_mean_sequential[
         )
         var delta_total = entering.values - expiring.values
         var delta_count = entering.counts - expiring.counts
-
         comptime for lane in range(width):
             if lane < active:
                 total += delta_total[lane]

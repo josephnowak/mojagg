@@ -43,7 +43,6 @@ def _move_cov_sequential[
         var active = min(width, n - input_offset)
         if input_offset < window:
             active = min(active, window - input_offset)
-
         var entering_a, entering_b = load_masked_pair[dtype, width](
             a_values, b_values, input_offset, active
         )
@@ -74,6 +73,7 @@ def _move_cov_sequential[
                     destination_ptr[
                         unsafe_offset=input_offset + lane
                     ] = nan_or_zero[dtype]()
+
         input_offset += active
 
 

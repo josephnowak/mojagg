@@ -23,7 +23,7 @@ def nan_squared_deviation_contiguous[
     mean: Scalar[dtype],
 ) -> Scalar[dtype]:
     """Accumulate squared deviations with a dtype-native SIMD accumulator."""
-    comptime width = simd_width_of[dtype]() * 8
+    comptime width = simd_width_of[dtype]()
     var squared = SIMD[dtype, width](0.0)
     var zero = SIMD[dtype, width](0.0)
     var mean_vector = SIMD[dtype, width](mean)
@@ -38,7 +38,7 @@ def nan_squared_deviation_contiguous[
         var delta = block - mean_vector
         squared += isnan(block).select(zero, delta * delta)
 
-    vectorize[width](len(values), step)
+    vectorize[width, unroll_factor=1](len(values), step)
     return squared.reduce_add()
 
 
@@ -68,14 +68,16 @@ struct NanVar[
         var total = state[0]
         var count = state[1]
 
-        if count <= Scalar[Self.dtype](self.ddof):
+        if count <= Scalar[DType.int64](self.ddof):
             output.write_span()[0] = nan_or_zero[Self.dtype]()
             return
 
-        var mean = total / count
+        var mean = total / Scalar[Self.dtype](count)
         var squared = nan_squared_deviation_contiguous[Self.dtype](values, mean)
 
-        var variance = squared / (count - Scalar[Self.dtype](self.ddof))
+        var variance = squared / Scalar[Self.dtype](
+            count - Scalar[DType.int64](self.ddof)
+        )
         if variance < 0.0:
             variance = 0.0
         comptime if Self.take_sqrt:

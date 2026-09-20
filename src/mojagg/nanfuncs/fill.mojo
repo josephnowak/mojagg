@@ -84,13 +84,11 @@ struct FillKernel[
     def _apply_step(
         self,
         value: Scalar[Self.dtype],
-        dest_idx: Int,
         mut current: Scalar[Self.dtype],
         mut remaining: Int,
         allowed: Int,
-        dest_ptr: Pointer[mut=True, Scalar[Self.dtype], MutUntrackedOrigin],
-    ):
-        """Internal recurrence step updating state and committing output."""
+    ) -> Scalar[Self.dtype]:
+        """Internal recurrence step updating state and returning output."""
         if isnan(value):
             if remaining <= 0:
                 current = nan_or_zero[Self.dtype]()
@@ -98,7 +96,7 @@ struct FillKernel[
         else:
             current = value
             remaining = allowed
-        dest_ptr[unsafe_offset=dest_idx] = current
+        return current
 
     @always_inline
     def __call__(mut self, tensors: Self.Signature):
@@ -119,7 +117,7 @@ struct FillKernel[
             )
             return
 
-        comptime width = simd_width_of[Self.dtype]() * 2
+        comptime width = simd_width_of[Self.dtype]() * 4
         var current = nan_or_zero[Self.dtype]()
         var allowed = self.limit if self.limit >= 0 else n
         var remaining = allowed
@@ -137,14 +135,13 @@ struct FillKernel[
 
             comptime for i in range(width):
                 comptime lane = (width - 1 - i) if Self.backward else i
-                self._apply_step(
+                block[lane] = self._apply_step(
                     block[lane],
-                    offset + lane,
                     current,
                     remaining,
                     allowed,
-                    dest_ptr,
                 )
+            dest_ptr.unsafe_store[width=width](offset, block)
 
             offset += chunk_step
 
@@ -155,13 +152,11 @@ struct FillKernel[
         var tail_step = Self._tail_step()
 
         while tail_i >= 0 and tail_i < n:
-            self._apply_step(
+            dest_ptr[unsafe_offset=tail_i] = self._apply_step(
                 src_ptr[unsafe_offset=tail_i],
-                tail_i,
                 current,
                 remaining,
                 allowed,
-                dest_ptr,
             )
             tail_i += tail_step
 

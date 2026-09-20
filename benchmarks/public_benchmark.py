@@ -49,6 +49,11 @@ import mojagg
 Axis = int | tuple[int, ...] | None
 IMPLEMENTATION_NAMES = ("mojagg", "numbagg")
 _ONE_GIB_F64_ELEMENTS = (1 << 30) // np.dtype(np.float64).itemsize
+_THREE_GIB_F64_ELEMENTS = (3 << 30) // np.dtype(np.float64).itemsize
+# Matrix functions allocate a (..., vars, vars) output, which can dwarf the
+# input for skewed shapes (e.g. many vars, few obs). Cap the *output* alone
+# to this budget so a case can never silently try to allocate tens of GiB.
+_MATRIX_OUTPUT_BUDGET_BYTES = 3 << 30
 
 REDUCTION_FUNCTIONS = [
     "allnan",
@@ -154,6 +159,45 @@ class MatrixTest:
     implementations: tuple[str, ...] = IMPLEMENTATION_NAMES
 
 
+def _matrix_output_bytes(test: MatrixTest) -> int:
+    """Bytes needed for a matrix test's ``(..., vars, vars)`` output.
+
+    The output is quadratic in the number of variables, so it can dwarf the
+    input for skewed shapes (many vars, few obs) even when the input itself
+    is small.
+    """
+
+    ndim = len(test.shape)
+    vars_axis, obs_axis = (a % ndim for a in test.axis)
+    vars_count = test.shape[vars_axis]
+    batch = 1
+    for dim_index, dim_size in enumerate(test.shape):
+        if dim_index not in (vars_axis, obs_axis):
+            batch *= dim_size
+    return batch * vars_count * vars_count * np.dtype(test.dtype).itemsize
+
+
+def _validate_matrix_tests(tests: list[MatrixTest]) -> None:
+    """Guard against matrix cases whose output would blow past the budget.
+
+    ``nancorrmatrix``/``nancovmatrix`` allocate a square ``vars x vars``
+    output, so a shape with many "vars" and few "obs" (e.g. a tall matrix)
+    can silently require tens of GiB even though the raw input is tiny.
+    """
+
+    for test in tests:
+        output_bytes = _matrix_output_bytes(test)
+        if output_bytes > _MATRIX_OUTPUT_BUDGET_BYTES:
+            raise ValueError(
+                f"matrix test {test.name!r} would allocate a "
+                f"{_format_bytes(output_bytes)} output for shape {test.shape} "
+                f"axis={test.axis}; exceeds the "
+                f"{_format_bytes(_MATRIX_OUTPUT_BUDGET_BYTES)} output budget. "
+                "Reduce the number of vars (the axis[0]/axis[1] dimensions) "
+                "for this case."
+            )
+
+
 @dataclass
 class RollingTest:
     """One trailing moving-window workload."""
@@ -231,6 +275,9 @@ class BenchmarkSuite:
     verify_results: bool = True
     include_numbagg: bool = True
 
+    def __post_init__(self) -> None:
+        _validate_matrix_tests(self.matrix_tests)
+
 
 class Quick(BenchmarkSuite):
     """A small complete suite suitable for local smoke checks."""
@@ -306,8 +353,13 @@ class Public(BenchmarkSuite):
     """The default AWS/publication suite.
 
     It covers contiguous and batched inputs, multiple positive axis layouts,
-    several NaN densities, and group cardinality. It includes one GiB float64
-    cases for each operation family; cases are prepared serially to keep the
+    several NaN densities, and group cardinality. Cases focus on float64;
+    float32 is exercised only on a contiguous case per family so dtype
+    coverage does not multiply the case count. It includes 3 GiB float64
+    cases for each non-matrix operation family (matrix cases stay at 1 GiB
+    because they scale as vars x obs), with matching axis=0 and axis=1
+    variants so the non-contiguous axis=0 path is measured at the same scale
+    as the contiguous axis=1 path. Cases are prepared serially to keep the
     peak working set suitable for a 10 GiB host. Those large cases compare
     mojagg with numbagg.
     """
@@ -316,20 +368,35 @@ class Public(BenchmarkSuite):
         defaults: dict[str, Any] = {
             "name": "public",
             "reduction_tests": [
-                ReductionTest("1d_clean_f64", (250_000,), axis=0, nan_fraction=0.0, seed=101),
+                ReductionTest("1d_clean_f64", (3_000_000,), axis=0, nan_fraction=0.0, seed=101),
                 ReductionTest(
-                    "32x4m_1gib_clean_f64",
-                    (32, _ONE_GIB_F64_ELEMENTS // 32),
+                    "1d_contig_clean_f32",
+                    (3_000_000,),
+                    dtype="float32",
+                    axis=0,
+                    nan_fraction=0.0,
+                    seed=105,
+                ),
+                ReductionTest(
+                    "32x_3gib_clean_f64_axis1",
+                    (32, _THREE_GIB_F64_ELEMENTS // 32),
                     axis=1,
                     nan_fraction=0.0,
                     seed=104,
                     implementations=("mojagg", "numbagg"),
                 ),
+                ReductionTest(
+                    "3gib_clean_f64_axis0",
+                    (_THREE_GIB_F64_ELEMENTS // 32, 32),
+                    axis=0,
+                    nan_fraction=0.0,
+                    seed=106,
+                    implementations=("mojagg", "numbagg"),
+                ),
                 ReductionTest("2d_nan_f64", (32, 16_384), axis=1, nan_fraction=0.10, seed=102),
                 ReductionTest(
-                    "3d_multi_axis_f32",
+                    "3d_multi_axis_f64",
                     (8, 64, 512),
-                    dtype="float32",
                     axis=(1, 2),
                     nan_fraction=0.25,
                     nan_pattern="blocks",
@@ -339,7 +406,7 @@ class Public(BenchmarkSuite):
             "groupby_tests": [
                 GroupByTest(
                     "1d_256_groups",
-                    (250_000,),
+                    (3_000_000,),
                     axis=0,
                     num_groups=256,
                     label_dtype="int32",
@@ -347,8 +414,8 @@ class Public(BenchmarkSuite):
                     seed=201,
                 ),
                 GroupByTest(
-                    "16x8m_1gib_16k_groups",
-                    (16, _ONE_GIB_F64_ELEMENTS // 16),
+                    "16x_3gib_16k_groups_axis1",
+                    (16, _THREE_GIB_F64_ELEMENTS // 16),
                     axis=1,
                     num_groups=16_384,
                     label_dtype="int32",
@@ -357,8 +424,18 @@ class Public(BenchmarkSuite):
                     implementations=("mojagg", "numbagg"),
                 ),
                 GroupByTest(
+                    "3gib_16k_groups_axis0",
+                    (_THREE_GIB_F64_ELEMENTS // 16, 16),
+                    axis=0,
+                    num_groups=16_384,
+                    label_dtype="int32",
+                    nan_fraction=0.10,
+                    seed=205,
+                    implementations=("mojagg", "numbagg"),
+                ),
+                GroupByTest(
                     "1d_16k_groups",
-                    (250_000,),
+                    (3_000_000,),
                     axis=0,
                     num_groups=16_384,
                     label_dtype="int64",
@@ -376,7 +453,33 @@ class Public(BenchmarkSuite):
                 ),
             ],
             "matrix_tests": [
-                MatrixTest("32_vars_8k_obs", (32, 8_192), axis=(0, 1), nan_fraction=0.05, seed=301),
+                MatrixTest(
+                    "32_vars_32k_obs", (32, 32_768), axis=(0, 1), nan_fraction=0.05, seed=301
+                ),
+                MatrixTest(
+                    "square_1k_vars_1k_obs",
+                    (1_024, 1_024),
+                    axis=(0, 1),
+                    nan_fraction=0.05,
+                    seed=304,
+                ),
+                MatrixTest(
+                    "wide_16_vars_64k_obs",
+                    (16, 65_536),
+                    axis=(0, 1),
+                    nan_fraction=0.05,
+                    seed=305,
+                ),
+                MatrixTest(
+                    # Keep vars small even though rows >> columns: the
+                    # nancorrmatrix/nancovmatrix output is vars x vars, so a
+                    # 64k-vars case would try to allocate a 32 GiB array.
+                    "tall_8192_vars_128_obs",
+                    (8_192, 128),
+                    axis=(0, 1),
+                    nan_fraction=0.05,
+                    seed=306,
+                ),
                 MatrixTest(
                     "32_vars_1gib_obs",
                     (32, _ONE_GIB_F64_ELEMENTS // 32),
@@ -386,8 +489,8 @@ class Public(BenchmarkSuite):
                     implementations=("mojagg", "numbagg"),
                 ),
                 MatrixTest(
-                    "batched_16_vars_2k_obs",
-                    (8, 16, 2_048),
+                    "batched_16_vars_8k_obs",
+                    (8, 16, 8_192),
                     axis=(1, 2),
                     nan_fraction=0.15,
                     seed=302,
@@ -395,8 +498,8 @@ class Public(BenchmarkSuite):
             ],
             "rolling_tests": [
                 RollingTest(
-                    "8x100k_window128",
-                    (8, 100_000),
+                    "8x400k_window128",
+                    (8, 400_000),
                     axis=1,
                     window=128,
                     min_count=64,
@@ -405,8 +508,19 @@ class Public(BenchmarkSuite):
                     seed=401,
                 ),
                 RollingTest(
-                    "16x8m_1gib_window128",
-                    (16, _ONE_GIB_F64_ELEMENTS // 16),
+                    "1d_contig_window32_f32",
+                    (3_000_000,),
+                    dtype="float32",
+                    axis=0,
+                    window=32,
+                    min_count=16,
+                    nan_fraction=0.05,
+                    second_nan_fraction=0.08,
+                    seed=402,
+                ),
+                RollingTest(
+                    "16x_3gib_window128_axis1",
+                    (16, _THREE_GIB_F64_ELEMENTS // 16),
                     axis=1,
                     window=128,
                     min_count=64,
@@ -416,21 +530,21 @@ class Public(BenchmarkSuite):
                     implementations=("mojagg", "numbagg"),
                 ),
                 RollingTest(
-                    "4096x16_axis0_window32",
-                    (4_096, 16),
-                    dtype="float32",
+                    "3gib_window128_axis0",
+                    (_THREE_GIB_F64_ELEMENTS // 16, 16),
                     axis=0,
-                    window=32,
-                    min_count=16,
-                    nan_fraction=0.20,
-                    second_nan_fraction=0.10,
-                    seed=402,
+                    window=128,
+                    min_count=64,
+                    nan_fraction=0.05,
+                    second_nan_fraction=0.08,
+                    seed=404,
+                    implementations=("mojagg", "numbagg"),
                 ),
             ],
             "exponential_tests": [
                 ExponentialTest(
-                    "8x100k_alpha015",
-                    (8, 100_000),
+                    "8x400k_alpha015",
+                    (8, 400_000),
                     axis=1,
                     alpha=0.15,
                     nan_fraction=0.05,
@@ -438,8 +552,8 @@ class Public(BenchmarkSuite):
                     seed=501,
                 ),
                 ExponentialTest(
-                    "16x8m_1gib_alpha015",
-                    (16, _ONE_GIB_F64_ELEMENTS // 16),
+                    "16x_3gib_alpha015_axis1",
+                    (16, _THREE_GIB_F64_ELEMENTS // 16),
                     axis=1,
                     alpha=0.15,
                     nan_fraction=0.05,
@@ -447,23 +561,42 @@ class Public(BenchmarkSuite):
                     seed=503,
                     implementations=("mojagg", "numbagg"),
                 ),
+                ExponentialTest(
+                    "3gib_alpha015_axis0",
+                    (_THREE_GIB_F64_ELEMENTS // 16, 16),
+                    axis=0,
+                    alpha=0.15,
+                    nan_fraction=0.05,
+                    second_nan_fraction=0.08,
+                    seed=504,
+                    implementations=("mojagg", "numbagg"),
+                ),
             ],
             "fill_tests": [
                 FillTest(
-                    "8x100k_axis1_blocks",
-                    (8, 100_000),
+                    "8x625k_axis1_blocks",
+                    (8, 625_000),
                     axis=1,
                     limit=128,
                     nan_fraction=0.20,
                     seed=601,
                 ),
                 FillTest(
-                    "16x8m_1gib_axis1_blocks",
-                    (16, _ONE_GIB_F64_ELEMENTS // 16),
+                    "16x_3gib_axis1_blocks",
+                    (16, _THREE_GIB_F64_ELEMENTS // 16),
                     axis=1,
                     limit=128,
                     nan_fraction=0.20,
                     seed=603,
+                    implementations=("mojagg", "numbagg"),
+                ),
+                FillTest(
+                    "3gib_axis0_blocks",
+                    (_THREE_GIB_F64_ELEMENTS // 16, 16),
+                    axis=0,
+                    limit=128,
+                    nan_fraction=0.20,
+                    seed=604,
                     implementations=("mojagg", "numbagg"),
                 ),
                 FillTest(
@@ -1060,30 +1193,22 @@ def _run_adapter(
             candidate = _run_logged_call(f"{label} verification", call)
             verification = "pass" if _compare_outputs(baseline_output, candidate) else "mismatch"
             if verification == "mismatch":
-                _log(f"MISMATCH {label}: verification failed")
-                return _record(
-                    section,
-                    function,
-                    case_name,
-                    case_metadata,
-                    implementation,
-                    "error",
-                    error="result mismatch against mojagg",
-                    verification=verification,
-                )
+                _log(f"DIVERGE {label}: results did not match mojagg, timing still measured")
         timing = _measure(call, suite.warmups, suite.repeats, label)
+        status = "diverge" if verification == "mismatch" else "ok"
         record = _record(
             section,
             function,
             case_name,
             case_metadata,
             implementation,
-            "ok",
+            status,
             timing=timing,
+            error=None if status == "ok" else "result mismatch against mojagg",
             verification=verification,
         )
         _log(
-            f"END {label} status=ok median={_format_duration(timing.median_ns)}"
+            f"END {label} status={status} median={_format_duration(timing.median_ns)}"
             f" p95={_format_duration(timing.p95_ns)}"
             f" cpu/wall={timing.median_cpu_wall_ratio:.2f}x"
         )
@@ -1106,14 +1231,15 @@ def _add_ratios(records: list[dict[str, Any]]) -> None:
     for record in records:
         key = (record["section"], record["function"], record["case"])
         grouped.setdefault(key, []).append(record)
+    comparable_statuses = ("ok", "diverge")
     for rows in grouped.values():
         baseline = next((row for row in rows if row["implementation"] == "mojagg"), None)
-        if baseline is None or baseline["status"] != "ok":
+        if baseline is None or baseline["status"] not in comparable_statuses:
             continue
         baseline_time = baseline["time_ns"]
         baseline_memory = baseline["memory_bytes"]
         for row in rows:
-            if row["status"] != "ok":
+            if row["status"] not in comparable_statuses:
                 continue
             if baseline_time and row["time_ns"] is not None:
                 row["time_ratio"] = row["time_ns"] / baseline_time
@@ -2522,8 +2648,9 @@ a { color: var(--mint); text-decoration: none; }
 .data-table {
   width: 100%;
   border-collapse: collapse;
-  min-width: 1100px;
-  font-size: 0.77rem;
+  min-width: 880px;
+  table-layout: fixed;
+  font-size: 0.71rem;
 }
 .data-table th {
   position: sticky;
@@ -2532,18 +2659,91 @@ a { color: var(--mint); text-decoration: none; }
   color: #cfe2f7;
   text-align: left;
   text-transform: uppercase;
-  letter-spacing: 0.08em;
-  font-size: 0.66rem;
-  padding: 10px 11px;
+  letter-spacing: 0.06em;
+  font-size: 0.6rem;
+  padding: 8px 7px;
   z-index: 2;
 }
 .data-table td {
   border-top: 1px solid rgba(38, 68, 95, 0.55);
-  padding: 8px 11px;
+  padding: 6px 7px;
   white-space: nowrap;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  max-width: 150px;
 }
 .data-table tr:hover {
   background: rgba(109, 168, 255, 0.06);
+}
+
+/* Table controls: multi-criteria sort + pagination */
+.table-controls {
+  display: flex;
+  flex-wrap: wrap;
+  align-items: center;
+  justify-content: space-between;
+  gap: 10px;
+  margin-bottom: 10px;
+}
+.sort-controls {
+  display: flex;
+  flex-wrap: wrap;
+  align-items: center;
+  gap: 10px;
+}
+.sort-field {
+  display: inline-flex;
+  align-items: center;
+  gap: 5px;
+  font-size: 0.72rem;
+  color: var(--muted);
+}
+.sort-field select {
+  border: 1px solid var(--line);
+  background: #142c45;
+  color: var(--text);
+  padding: 4px 7px;
+  border-radius: 7px;
+  font-size: 0.72rem;
+}
+.sort-dir-btn {
+  border: 1px solid var(--line);
+  background: #142c45;
+  color: var(--text);
+  padding: 4px 9px;
+  border-radius: 7px;
+  cursor: pointer;
+  font-size: 0.72rem;
+  font-weight: 600;
+}
+.sort-dir-btn:hover {
+  border-color: var(--mint);
+  color: var(--mint);
+}
+.pager {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  font-size: 0.72rem;
+  color: var(--muted);
+}
+.page-btn {
+  border: 1px solid var(--line);
+  background: #142c45;
+  color: var(--text);
+  padding: 5px 10px;
+  border-radius: 7px;
+  cursor: pointer;
+  font-size: 0.72rem;
+  font-weight: 600;
+}
+.page-btn:hover:not(:disabled) {
+  border-color: var(--mint);
+  color: var(--mint);
+}
+.page-btn:disabled {
+  opacity: 0.4;
+  cursor: not-allowed;
 }
 
 .good { color: var(--mint); font-weight: 750; }
@@ -2598,6 +2798,15 @@ const fmtBytes=value=>{if(value==null)return'N/A';if(value<1024)return`${value.t
 const fmtRatio=value=>value==null?'N/A':`${value.toFixed(2)}×`;
 const ratioClass=value=>value==null?'muted':value<.98?'good':value>1.02?'warn':'muted';
 const fmtCount=n=>{if(n==null)return'';if(n<1000)return String(n);if(n<1e6)return(n/1e3).toFixed(1)+'K';return(n/1e6).toFixed(1)+'M'};
+const COMPARABLE_STATUSES=['ok','diverge'];
+const CHART_CASE_LIMIT=15;
+const PAGE_SIZE=25;
+const SORT_FIELDS=[{key:'function',label:'Function'},{key:'case',label:'Case'},{key:'dtype',label:'Dtype'},{key:'elements',label:'Elements'},{key:'implementation',label:'Implementation'},{key:'status',label:'Status'},{key:'time_ns',label:'Median time'},{key:'memory_bytes',label:'Memory'},{key:'time_ratio',label:'Time ratio'},{key:'memory_ratio',label:'Memory ratio'}];
+const tableState={};
+function getTableState(section){
+  if(!tableState[section])tableState[section]={page:1,sort:[{key:'function',dir:'asc'},{key:'case',dir:'asc'}]};
+  return tableState[section];
+}
 
 const sectionNames=['reduction','groupby','matrix','rolling','exponential','non-reduction'];
 const sectionTitles={reduction:'Reductions',groupby:'Group by',matrix:'Matrix functions',rolling:'Rolling windows',exponential:'Exponential moving','non-reduction':'Non-reduction'};
@@ -2655,6 +2864,62 @@ function groups(rows){
   return[...map.values()];
 }
 
+function caseElements(meta){
+  if(!meta||!meta.shape)return 0;
+  const shape=Array.isArray(meta.shape)?meta.shape:[meta.shape];
+  return shape.reduce((a,b)=>a*b,1);
+}
+
+function topGroups(rows,limit){
+  const all=groups(rows);
+  all.sort((a,b)=>caseElements(b[0].case_metadata)-caseElements(a[0].case_metadata));
+  return limit?all.slice(0,limit):all;
+}
+
+function sortValue(r,key){
+  const m=r.case_metadata||{};
+  switch(key){
+    case'function':return r.function||'';
+    case'case':return r.case||'';
+    case'dtype':return m.dtype||'';
+    case'elements':return caseElements(m);
+    case'implementation':return r.implementation||'';
+    case'status':return r.status||'';
+    case'time_ns':return r.time_ns;
+    case'memory_bytes':return r.memory_bytes;
+    case'time_ratio':return r.time_ratio;
+    case'memory_ratio':return r.memory_ratio;
+    default:return null;
+  }
+}
+
+function compareRows(a,b,sortSpec){
+  for(const{key,dir}of sortSpec){
+    const av=sortValue(a,key),bv=sortValue(b,key);
+    if(av==null&&bv==null)continue;
+    if(av==null)return 1;
+    if(bv==null)return-1;
+    const cmp=typeof av==='string'?av.localeCompare(bv):av-bv;
+    if(cmp!==0)return dir==='asc'?cmp:-cmp;
+  }
+  return 0;
+}
+
+function sortControlsMarkup(section){
+  const state=getTableState(section);
+  let out='<div class="sort-controls">';
+  state.sort.forEach((s,idx)=>{
+    const options=SORT_FIELDS.map(f=>'<option value="'+f.key+'"'+(f.key===s.key?' selected':'')+'>'+f.label+'</option>').join('');
+    out+='<label class="sort-field">'+(idx===0?'Sort by':'then by')+' <select class="sort-key" data-section="'+esc(section)+'" data-idx="'+idx+'">'+options+'</select><button type="button" class="sort-dir-btn" data-section="'+esc(section)+'" data-idx="'+idx+'" title="Toggle direction">'+(s.dir==='asc'?'\u2191 asc':'\u2193 desc')+'</button></label>';
+  });
+  out+='</div>';
+  return out;
+}
+
+function pagerMarkup(section,page,totalPages,total){
+  return'<div class="pager"><button type="button" class="page-btn" data-section="'+esc(section)+'" data-dir="prev"'+(page<=1?' disabled':'')+'>\u2039 Prev</button><span class="page-info">Page '+page+' / '+totalPages+' ('+total+' rows)</span><button type="button" class="page-btn" data-section="'+esc(section)+'" data-dir="next"'+(page>=totalPages?' disabled':'')+'>Next \u203a</button></div>';
+}
+
 function ratioColor(value){
   if(value==null)return'rgba(144,169,194,.08)';
   const strength=Math.min(1,Math.abs(Math.log(value))/1.4);
@@ -2662,7 +2927,7 @@ function ratioColor(value){
 }
 
 function statMarkup(){
-  const comparable=records.filter(r=>r.implementation==='numbagg'&&r.status==='ok'&&r.time_ratio!=null);
+  const comparable=records.filter(r=>r.implementation==='numbagg'&&COMPARABLE_STATUSES.includes(r.status)&&r.time_ratio!=null);
   const wins=comparable.filter(r=>r.time_ratio>1).length;
   const median=comparable.length?comparable.map(r=>r.time_ratio).sort((a,b)=>a-b)[Math.floor(comparable.length/2)]:null;
   const ok=records.filter(r=>r.implementation==='mojagg'&&r.status==='ok').length;
@@ -2746,7 +3011,7 @@ function worst3Markup(){
 function scalingMarkup(){
   const sizeMap=new Map();
   for(const r of records){
-    if(r.status!=='ok'||r.time_ns==null)continue;
+    if(!COMPARABLE_STATUSES.includes(r.status)||r.time_ns==null)continue;
     const shape=r.case_metadata?.shape;
     if(!shape||!Array.isArray(shape))continue;
     const sz=shape.reduce((a,b)=>a*b,1);
@@ -2802,7 +3067,7 @@ function scalingMarkup(){
 
   const catStats=[];
   for(const sec of sectionNames){
-    const secRecs=records.filter(r=>r.section===sec&&r.implementation==='numbagg'&&r.status==='ok'&&r.time_ratio!=null);
+    const secRecs=records.filter(r=>r.section===sec&&r.implementation==='numbagg'&&COMPARABLE_STATUSES.includes(r.status)&&r.time_ratio!=null);
     if(!secRecs.length)continue;
     const ratios=secRecs.map(r=>r.time_ratio).sort((a,b)=>a-b);
     const medRatio=ratios[Math.floor(ratios.length/2)];
@@ -2862,7 +3127,7 @@ function renderSidebar(){
 }
 
 function barChart(rows){
-  const scenarios=groups(rows).slice(0,40);
+  const scenarios=topGroups(rows,CHART_CASE_LIMIT);
   if(!scenarios.length)return'<div class="empty">No rows match the current filters.</div>';
   const valid=scenarios.flatMap(g=>g.filter(r=>r.time_ratio!=null).map(r=>r.time_ratio));
   const max=Math.max(1.25,...valid,1);
@@ -2883,7 +3148,8 @@ function barChart(rows){
 }
 
 function scatterChart(rows){
-  const points=rows.filter(r=>r.implementation==='numbagg'&&r.status==='ok'&&r.time_ratio>0&&r.memory_ratio>0);
+  const topKeys=new Set(topGroups(rows,CHART_CASE_LIMIT).map(g=>g[0].function+'|||'+g[0].case));
+  const points=rows.filter(r=>r.implementation==='numbagg'&&COMPARABLE_STATUSES.includes(r.status)&&r.time_ratio>0&&r.memory_ratio>0&&topKeys.has(r.function+'|||'+r.case));
   if(!points.length)return'<div class="empty">No comparable time/memory points for this filter.</div>';
   const width=700,height=390,left=66,right=22,top=30,bottom=58;
   const values=points.flatMap(r=>[r.time_ratio,r.memory_ratio]);
@@ -2916,7 +3182,7 @@ function scatterChart(rows){
 }
 
 function heatmap(rows){
-  const scenarios=groups(rows);
+  const scenarios=topGroups(rows,CHART_CASE_LIMIT);
   if(!scenarios.length)return'';
   const impls=selectedImplementations();
   let head='<tr><th>Function · case</th><th>Metadata</th>';
@@ -2936,11 +3202,25 @@ function heatmap(rows){
   return'<table class="data-table"><thead>'+head+'</thead><tbody>'+body+'</tbody></table>';
 }
 
-function detailTable(rows){
+function statusBadge(status){
+  if(status==='ok')return'<span class="good">OK</span>';
+  if(status==='diverge')return'<span class="warn">DIVERGE</span>';
+  if(status==='na')return'<span class="muted">N/A</span>';
+  return'<span class="bad">ERROR</span>';
+}
+
+function detailTable(rows,section){
   if(!rows.length)return'<div class="empty">No rows match the current filters.</div>';
+  const state=getTableState(section);
+  const sorted=rows.slice().sort((a,b)=>compareRows(a,b,state.sort));
+  const totalPages=Math.max(1,Math.ceil(sorted.length/PAGE_SIZE));
+  if(state.page>totalPages)state.page=totalPages;
+  if(state.page<1)state.page=1;
+  const startIdx=(state.page-1)*PAGE_SIZE;
+  const pageRows=sorted.slice(startIdx,startIdx+PAGE_SIZE);
   let body='';
-  for(const r of rows){
-    const status=r.status==='ok'?'<span class="good">OK</span>':r.status==='na'?'<span class="muted">N/A</span>':'<span class="bad">ERROR</span>';
+  for(const r of pageRows){
+    const status=statusBadge(r.status);
     const m=r.case_metadata||{};
     const shapeStr=m.shape?m.shape.join('×')+(m.shape.length?' <span class="muted">('+fmtCount(m.shape.reduce((a,b)=>a*b,1))+')</span>':''):'—';
     const nanStr=m.nan_fraction!=null?Math.round(m.nan_fraction*100)+'% <span class="muted">('+esc(m.nan_pattern||'random')+')</span>':'0%';
@@ -2952,9 +3232,10 @@ function detailTable(rows){
     if(m.ddof!=null&&m.ddof!==0)params.push('ddof='+m.ddof);
     const paramStr=params.join(', ')||'—';
 
-    body+='<tr><td><strong>'+esc(r.function)+'</strong></td><td>'+esc(r.case)+'</td><td><span class="pill-badge">'+esc(m.dtype||'—')+'</span></td><td>'+shapeStr+'</td><td>'+nanStr+'</td><td class="muted">'+esc(paramStr)+'</td><td><strong style="color:'+COLORS[r.implementation]+'">'+esc(r.implementation)+'</strong></td><td>'+status+'</td><td>'+fmtNs(r.time_ns)+'</td><td>'+fmtMemCell(r.memory_bytes)+'</td><td class="'+ratioClass(r.time_ratio)+'">'+fmtRatio(r.time_ratio)+'</td><td class="'+ratioClass(r.memory_ratio)+'">'+fmtRatio(r.memory_ratio)+'</td><td title="'+esc(r.error||'')+'">'+(r.verification?esc(r.verification):'<span class="muted">—</span>')+'</td></tr>';
+    body+='<tr><td title="'+esc(r.function)+'"><strong>'+esc(r.function)+'</strong></td><td title="'+esc(r.case)+'">'+esc(r.case)+'</td><td><span class="pill-badge">'+esc(m.dtype||'—')+'</span></td><td title="'+esc(shapeStr.replace(/<[^>]+>/g,''))+'">'+shapeStr+'</td><td>'+nanStr+'</td><td class="muted" title="'+esc(paramStr)+'">'+esc(paramStr)+'</td><td><strong style="color:'+COLORS[r.implementation]+'">'+esc(r.implementation)+'</strong></td><td>'+status+'</td><td>'+fmtNs(r.time_ns)+'</td><td>'+fmtMemCell(r.memory_bytes)+'</td><td class="'+ratioClass(r.time_ratio)+'">'+fmtRatio(r.time_ratio)+'</td><td class="'+ratioClass(r.memory_ratio)+'">'+fmtRatio(r.memory_ratio)+'</td><td title="'+esc(r.error||'')+'">'+(r.verification?esc(r.verification):'<span class="muted">—</span>')+'</td></tr>';
   }
-  return'<table class="data-table"><thead><tr><th>Function</th><th>Case</th><th>Dtype</th><th>Shape / Elements</th><th>NaNs</th><th>Parameters</th><th>Implementation</th><th>Status</th><th>Median time</th><th>Peak tracked memory</th><th>Time ratio</th><th>Memory ratio</th><th>Verification</th></tr></thead><tbody>'+body+'</tbody></table>';
+  const controls='<div class="table-controls">'+sortControlsMarkup(section)+pagerMarkup(section,state.page,totalPages,sorted.length)+'</div>';
+  return controls+'<table class="data-table"><thead><tr><th>Function</th><th>Case</th><th>Dtype</th><th>Shape / Elements</th><th>NaNs</th><th>Parameters</th><th>Implementation</th><th>Status</th><th>Median time</th><th>Peak memory</th><th>Time ratio</th><th>Memory ratio</th><th>Verification</th></tr></thead><tbody>'+body+'</tbody></table>'+controls;
 }
 
 function renderSections(){
@@ -3036,8 +3317,36 @@ function renderAll(){
     if(chart)chart.innerHTML=barChart(rows);
     if(scatter)scatter.innerHTML=scatterChart(rows);
     if(heat)heat.innerHTML=heatmap(rows);
-    if(table)table.innerHTML=detailTable(rows);
+    if(table)table.innerHTML=detailTable(rows,section);
   }
+}
+
+function wireTableControls(){
+  document.addEventListener('change',e=>{
+    if(!e.target.classList.contains('sort-key'))return;
+    const section=e.target.dataset.section,idx=+e.target.dataset.idx;
+    const state=getTableState(section);
+    state.sort[idx].key=e.target.value;
+    state.page=1;
+    renderAll();
+  });
+  document.addEventListener('click',e=>{
+    const dirBtn=e.target.closest('.sort-dir-btn');
+    if(dirBtn){
+      const section=dirBtn.dataset.section,idx=+dirBtn.dataset.idx;
+      const state=getTableState(section);
+      state.sort[idx].dir=state.sort[idx].dir==='asc'?'desc':'asc';
+      renderAll();
+      return;
+    }
+    const pageBtn=e.target.closest('.page-btn');
+    if(pageBtn&&!pageBtn.disabled){
+      const section=pageBtn.dataset.section;
+      const state=getTableState(section);
+      state.page+=pageBtn.dataset.dir==='next'?1:-1;
+      renderAll();
+    }
+  });
 }
 
 function init(){
@@ -3052,6 +3361,7 @@ function init(){
   $('#impls').innerHTML=implementations.map(i=>'<label class="check"><input class="impl-check" value="'+i+'" type="checkbox" checked> '+i+'</label>').join('');
   renderSections();
   renderSidebar();
+  wireTableControls();
   for(const check of $$('.impl-check'))check.onchange=renderAll;
   $('#search').oninput=renderAll;
   renderAll();

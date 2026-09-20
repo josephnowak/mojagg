@@ -34,7 +34,7 @@ def nan_arg_extreme_contiguous[
     if len(values) == 0:
         return -1
 
-    comptime width = simd_width_of[DType.int64]() * 4
+    comptime width = simd_width_of[DType.int64]()
     var identity = pos_inf_or_max[dtype]() if is_min else neg_inf_or_min[
         dtype
     ]()

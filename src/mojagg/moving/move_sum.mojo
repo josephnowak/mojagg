@@ -47,11 +47,8 @@ def _move_sum_sequential[
 
     while input_offset < n:
         var active = min(width, n - input_offset)
-        # Keep a block on one side of the window boundary. This preserves the
-        # warmup recurrence while using one scan loop for the whole core.
         if input_offset < window:
             active = min(active, window - input_offset)
-
         var entering = load_masked_block[dtype, width](
             values, input_offset, active
         )
@@ -60,7 +57,6 @@ def _move_sum_sequential[
         )
         var delta_sum = entering.values - expiring.values
         var delta_count = entering.counts - expiring.counts
-
         comptime for lane in range(width):
             if lane < active:
                 sum += delta_sum[lane]

@@ -27,19 +27,19 @@ struct GroupNanMean[
         GUTensor[Self.value_t, True, CoreSpec[Dim[1]]],
     ]
 
-    var counts: Preallocated[DType.int64]
+    var counts: Preallocated[Self.label_t]
 
     def __init__(out self):
-        self.counts = Preallocated[DType.int64]()
+        self.counts = Preallocated[Self.label_t]()
 
     def __init__(out self, *, copy: Self):
-        self.counts = Preallocated[DType.int64]()
+        self.counts = Preallocated[Self.label_t]()
 
     @always_inline
     @staticmethod
     def _add_lane(
         destination: Pointer[mut=True, Scalar[Self.value_t], _],
-        counts: Pointer[mut=True, Scalar[DType.int64], _],
+        counts: Pointer[mut=True, Scalar[Self.label_t], _],
         label_value: Scalar[Self.label_t],
         value: Scalar[Self.value_t],
     ):
@@ -57,9 +57,11 @@ struct GroupNanMean[
         var values = value_input.read_span()
         var labels = label_input.read_span()
         var destination = output.write_span()
-        var count_ptr = self.counts.get_ptr(len(destination), Int64(0))
+        var count_ptr = self.counts.get_ptr(
+            len(destination), Scalar[Self.label_t](0)
+        )
 
-        comptime width = simd_width_of[Self.value_t]() * 8
+        comptime width = 2
         var value_ptr = values.unsafe_ptr()
         var label_ptr = labels.unsafe_ptr()
         var destination_ptr = destination.unsafe_ptr()
@@ -86,21 +88,32 @@ struct GroupNanMean[
                     value_block[lane],
                 )
 
-        vectorize[width](len(values), step)
+        vectorize[width, unroll_factor=8](len(values), step)
 
         def finalize[
             vector_width: Int
         ](i: Int, evl: Int,) {imm destination_ptr, imm count_ptr}:
-            comptime for lane in range(width):
-                if lane < evl:
-                    var count = count_ptr[unsafe_offset=i + lane]
-                    if count == 0:
-                        destination_ptr[unsafe_offset=i + lane] = nan_or_zero[
-                            Self.value_t
-                        ]()
-                    else:
-                        destination_ptr[unsafe_offset=i + lane] /= Scalar[
-                            Self.value_t
-                        ](count)
+            var value_block = load_block_or_identity[Self.value_t, width](
+                destination_ptr, i, evl, Scalar[Self.value_t](0)
+            )
+            var count_block = load_block_or_identity[Self.label_t, width](
+                count_ptr, i, evl, Scalar[Self.label_t](0)
+            )
+            var count_values = count_block.cast[Self.value_t]()
+            var mean_block = value_block / count_values
+            var empty = isnan(SIMD[Self.value_t, width](0) / count_values)
+            var nan_block = SIMD[Self.value_t, width](
+                nan_or_zero[Self.value_t]()
+            )
+            mean_block = empty.select(nan_block, mean_block)
+            if evl == width:
+                destination_ptr.unsafe_store[width=width](i, mean_block)
+            else:
+                comptime for lane in range(width):
+                    if lane < evl:
+                        destination_ptr[unsafe_offset=i + lane] = mean_block[
+                            lane
+                        ]
 
-        vectorize[width](len(destination), finalize)
+        comptime width_finalize = simd_width_of[Self.value_t]
+        vectorize[width_finalize, unroll_factor=8](len(destination), finalize)

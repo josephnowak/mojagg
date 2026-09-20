@@ -49,7 +49,7 @@ struct GroupNanCount[
         var labels = label_input.read_span()
         var destination = output.write_span()
 
-        comptime width = simd_width_of[Self.value_t]() * 8
+        comptime width = 2
         var value_ptr = values.unsafe_ptr()
         var label_ptr = labels.unsafe_ptr()
         var destination_ptr = destination.unsafe_ptr()
@@ -74,4 +74,4 @@ struct GroupNanCount[
                     value_block[lane],
                 )
 
-        vectorize[width](len(values), step)
+        vectorize[width, unroll_factor=8](len(values), step)

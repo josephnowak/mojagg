@@ -20,7 +20,7 @@ def nan_product_contiguous[
 ](values: Span[Scalar[dtype], ImmUntrackedOrigin]) -> Scalar[dtype]:
     """Reduce one contiguous core with a SIMD product accumulator."""
 
-    comptime width = simd_width_of[dtype]() * 8
+    comptime width = simd_width_of[dtype]()
     var product = SIMD[dtype, width](1)
     var one = SIMD[dtype, width](1)
     var pointer = values.unsafe_ptr()
@@ -36,7 +36,7 @@ def nan_product_contiguous[
         else:
             product *= block
 
-    vectorize[width](len(values), step)
+    vectorize[width, unroll_factor=1](len(values), step)
     return product.reduce_mul()
 
 

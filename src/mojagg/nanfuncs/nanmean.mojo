@@ -18,28 +18,39 @@ from mojagg.drivers.guvectorize import (
 def nan_mean_contiguous[
     dtype: DType
 ](values: Span[Scalar[dtype], ImmUntrackedOrigin]) -> Tuple[
-    Scalar[dtype], Scalar[dtype]
+    Scalar[dtype], Scalar[DType.int64]
 ]:
-    """Accumulate a contiguous core with dtype-native SIMD sum and count."""
+    """Accumulate a contiguous core with dtype-native sum and integer count."""
 
-    comptime width = simd_width_of[dtype]() * 4
+    comptime width = simd_width_of[dtype]()
     var pointer = values.unsafe_ptr()
     var total = SIMD[dtype, width](0.0)
-    var count = SIMD[dtype, width](0.0)
-    var zero = SIMD[dtype, width](0.0)
-    var one = SIMD[dtype, width](1.0)
+    var count = SIMD[DType.int64, width](0)
+    var value_zero = SIMD[dtype, width](0.0)
+    var count_zero = SIMD[DType.int64, width](0)
+    var one = SIMD[DType.int64, width](1)
 
     def step[
         vector_width: Int
-    ](i: Int, evl: Int) {imm pointer, mut total, mut count, imm zero, imm one}:
+    ](
+        i: Int,
+        evl: Int,
+    ) {
+        imm pointer,
+        mut total,
+        mut count,
+        imm value_zero,
+        imm count_zero,
+        imm one,
+    }:
         var block = load_block_or_identity[dtype, width](
             pointer, i, evl, nan_or_zero[dtype]()
         )
         var missing = isnan(block)
-        total += missing.select(zero, block)
-        count += missing.select(zero, one)
+        total += missing.select(value_zero, block)
+        count += missing.select(count_zero, one)
 
-    vectorize[width](len(values), step)
+    vectorize[width, unroll_factor=1](len(values), step)
     return (total.reduce_add(), count.reduce_add())
 
 
@@ -64,4 +75,4 @@ struct NanMean[dtype: DType](GUFuncKernel, ImplicitlyCopyable):
         if count == 0:
             output.write_span()[0] = nan_or_zero[Self.dtype]()
         else:
-            output.write_span()[0] = total / count
+            output.write_span()[0] = total / Scalar[Self.dtype](count)

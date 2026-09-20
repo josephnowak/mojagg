@@ -56,6 +56,22 @@ Commands:
                 Run the standalone Mojo serial/parallel threshold benchmark.
   bench-quantile-select
                 Run the standalone Mojo sort vs multi-select quantile benchmark.
+  bench-group-nanmin
+                Compare grouped nanmin vectorization and unroll variants.
+  bench-group-nanmin-cartesian
+                Benchmark the grouped nanmin width/unroll Cartesian product.
+  bench-ffill-cartesian
+                Benchmark the forward-fill width/unroll Cartesian product.
+  bench-nansum-cartesian
+                Benchmark the nansum width/unroll Cartesian product.
+  bench-allnan-cartesian
+                Benchmark the allnan width/unroll Cartesian product.
+  bench-move-mean-cartesian
+                Benchmark the move_mean width/unroll Cartesian product.
+  bench-move-exp-nansum-cartesian
+                Benchmark the move_exp_nansum width/unroll Cartesian product.
+  bench-nancovmatrix-cartesian
+                Benchmark the nancovmatrix width/unroll Cartesian product.
   clean-native  Remove generated native binaries under python/mojagg only.
 
 Examples:
@@ -86,6 +102,14 @@ $aliases = @{
     "bench-public" = "bench-public"
     "bench-parallel-threshold" = "bench-parallel-threshold"
     "bench-quantile-select" = "bench-quantile-select"
+    "bench-group-nanmin" = "bench-group-nanmin"
+    "bench-group-nanmin-cartesian" = "bench-group-nanmin-cartesian"
+    "bench-ffill-cartesian" = "bench-ffill-cartesian"
+    "bench-nansum-cartesian" = "bench-nansum-cartesian"
+    "bench-allnan-cartesian" = "bench-allnan-cartesian"
+    "bench-move-mean-cartesian" = "bench-move-mean-cartesian"
+    "bench-move-exp-nansum-cartesian" = "bench-move-exp-nansum-cartesian"
+    "bench-nancovmatrix-cartesian" = "bench-nancovmatrix-cartesian"
     "clean-native" = "clean-native"
 }
 
@@ -344,6 +368,70 @@ ensure_pixi
 mkdir -p .tmp
 run_pixi mojo build -O3 --mcpu x86-64-v3 -o .tmp/quantile_select benchmarks/quantile_select.mojo
 .tmp/quantile_select "\$@"
+'@
+        break
+    }
+    "bench-group-nanmin" {
+        @'
+ensure_pixi
+"\$PIXI" install --locked
+run_pixi mojo run benchmarks/group_nanmin_variants.mojo "\$@"
+'@
+        break
+    }
+    "bench-group-nanmin-cartesian" {
+        @'
+ensure_pixi
+"\$PIXI" install --locked
+run_pixi mojo run benchmarks/group_nanmin_cartesian.mojo "\$@"
+'@
+        break
+    }
+    "bench-ffill-cartesian" {
+        @'
+ensure_pixi
+"\$PIXI" install --locked
+run_pixi mojo run benchmarks/ffill_cartesian.mojo "\$@"
+'@
+        break
+    }
+    "bench-nansum-cartesian" {
+        @'
+ensure_pixi
+"\$PIXI" install --locked
+run_pixi mojo run benchmarks/nansum_cartesian.mojo "\$@"
+'@
+        break
+    }
+    "bench-allnan-cartesian" {
+        @'
+ensure_pixi
+"\$PIXI" install --locked
+run_pixi mojo run benchmarks/allnan_cartesian.mojo "\$@"
+'@
+        break
+    }
+    "bench-move-mean-cartesian" {
+        @'
+ensure_pixi
+"\$PIXI" install --locked
+run_pixi mojo run benchmarks/move_mean_cartesian.mojo "\$@"
+'@
+        break
+    }
+    "bench-move-exp-nansum-cartesian" {
+        @'
+ensure_pixi
+"\$PIXI" install --locked
+run_pixi mojo run benchmarks/move_exp_nansum_cartesian.mojo "\$@"
+'@
+        break
+    }
+    "bench-nancovmatrix-cartesian" {
+        @'
+ensure_pixi
+"\$PIXI" install --locked
+run_pixi mojo run benchmarks/nancovmatrix_cartesian.mojo "\$@"
 '@
         break
     }

@@ -32,11 +32,11 @@ struct NanCount[dtype: DType](GUFuncKernel, ImplicitlyCopyable):
             output.write_span()[0] = Int64(len(values))
             return
 
-        comptime width = simd_width_of[Self.dtype]() * 8
+        comptime width = simd_width_of[Self.dtype]()
         var pointer = values.unsafe_ptr()
-        var count = SIMD[DType.float64, width](0.0)
-        var zero = SIMD[DType.float64, width](0.0)
-        var one = SIMD[DType.float64, width](1.0)
+        var count = SIMD[DType.int64, width](0)
+        var zero = SIMD[DType.int64, width](0)
+        var one = SIMD[DType.int64, width](1)
 
         def step[
             vector_width: Int
@@ -46,5 +46,5 @@ struct NanCount[dtype: DType](GUFuncKernel, ImplicitlyCopyable):
             )
             count += isnan(block).select(zero, one)
 
-        vectorize[width](len(values), step)
+        vectorize[width, unroll_factor=1](len(values), step)
         output.write_span()[0] = Int64(count.reduce_add())
