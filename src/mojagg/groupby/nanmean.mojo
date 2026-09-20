@@ -115,5 +115,5 @@ struct GroupNanMean[
                             lane
                         ]
 
-        comptime width_finalize = simd_width_of[Self.value_t]
+        comptime width_finalize = simd_width_of[Self.value_t]()
         vectorize[width_finalize, unroll_factor=8](len(destination), finalize)
