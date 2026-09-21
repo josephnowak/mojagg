@@ -10,6 +10,7 @@ Usage:
 
 from __future__ import annotations
 
+import concurrent.futures
 import contextlib
 import os
 import platform
@@ -138,13 +139,31 @@ def main() -> int:
             with contextlib.suppress(OSError):
                 old_so.unlink()
 
-        out = build_binding(name, exe, mcpu=mcpu)
-        print("built:", out)
+    jobs: list[tuple[str, str | None, str | None]] = [(name, mcpu, None) for name in BINDINGS]
+    if should_build_multi_target:
+        jobs.extend((name, "x86-64-v4", f"{name}_v4") for name in BINDINGS)
 
-        if should_build_multi_target:
-            # Build AVX-512 (x86-64-v4) variant for modern CPUs (Skylake-X, Zen 4/5, etc.)
-            v4_out = build_binding(name, exe, mcpu="x86-64-v4", out_name=f"{name}_v4")
-            print("built (AVX-512 variant):", v4_out)
+    try:
+        max_workers = int(os.environ.get("MOJAGG_BUILD_JOBS", str(len(jobs))))
+    except ValueError as exc:
+        raise SystemExit("MOJAGG_BUILD_JOBS must be a positive integer") from exc
+    if max_workers < 1:
+        raise SystemExit("MOJAGG_BUILD_JOBS must be a positive integer")
+    max_workers = min(max_workers, len(jobs))
+
+    print(f"building {len(jobs)} native extensions with {max_workers} parallel jobs", flush=True)
+    with concurrent.futures.ThreadPoolExecutor(max_workers=max_workers) as pool:
+        futures = {
+            pool.submit(build_binding, name, exe, target, out_name): out_name
+            for name, target, out_name in jobs
+        }
+        for future in concurrent.futures.as_completed(futures):
+            out_name = futures[future]
+            out = future.result()
+            if out_name:
+                print(f"built (AVX-512 variant): {out}")
+            else:
+                print("built:", out)
 
     if wheel:
         dist_dir = ROOT / "dist"
