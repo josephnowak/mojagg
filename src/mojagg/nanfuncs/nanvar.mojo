@@ -18,17 +18,15 @@ from mojagg.nanfuncs.nanmean import nan_mean_contiguous
 @always_inline
 def nan_squared_deviation_contiguous[
     dtype: DType
-](values: Span[Scalar[dtype], ImmUntrackedOrigin], mean: Float64,) -> Float64:
-    """Accumulate squared deviations with a float64 SIMD accumulator."""
-
-    comptime assert (
-        dtype == DType.float32 or dtype == DType.float64
-    ), "nanvar and nanstd require float32 or float64"
-
-    comptime width = simd_width_of[dtype]() * 8
-    var squared = SIMD[DType.float64, width](0.0)
-    var zero = SIMD[DType.float64, width](0.0)
-    var mean_vector = SIMD[DType.float64, width](mean)
+](
+    values: Span[Scalar[dtype], ImmUntrackedOrigin],
+    mean: Scalar[dtype],
+) -> Scalar[dtype]:
+    """Accumulate squared deviations with a dtype-native SIMD accumulator."""
+    comptime width = simd_width_of[dtype]()
+    var squared = SIMD[dtype, width](0.0)
+    var zero = SIMD[dtype, width](0.0)
+    var mean_vector = SIMD[dtype, width](mean)
     var pointer = values.unsafe_ptr()
 
     def step[
@@ -37,11 +35,10 @@ def nan_squared_deviation_contiguous[
         var block = load_block_or_identity[dtype, width](
             pointer, i, evl, nan_or_zero[dtype]()
         )
-        var widened = block.cast[DType.float64]()
-        var delta = widened - mean_vector
+        var delta = block - mean_vector
         squared += isnan(block).select(zero, delta * delta)
 
-    vectorize[width](len(values), step)
+    vectorize[width, unroll_factor=1](len(values), step)
     return squared.reduce_add()
 
 
@@ -49,7 +46,7 @@ struct NanVar[
     dtype: DType,
     take_sqrt: Bool = False,
 ](GUFuncKernel, ImplicitlyCopyable):
-    """Compute a two-pass float64 accumulation over one prepared core."""
+    """Compute a two-pass dtype-native accumulation over one prepared core."""
 
     comptime value_dtype = Self.dtype
     comptime out_dtype = Self.dtype
@@ -71,17 +68,19 @@ struct NanVar[
         var total = state[0]
         var count = state[1]
 
-        if count <= Int64(self.ddof):
+        if count <= Scalar[DType.int64](self.ddof):
             output.write_span()[0] = nan_or_zero[Self.dtype]()
             return
 
-        var mean = total / Float64(count)
+        var mean = total / Scalar[Self.dtype](count)
         var squared = nan_squared_deviation_contiguous[Self.dtype](values, mean)
 
-        var variance = squared / Float64(count - Int64(self.ddof))
+        var variance = squared / Scalar[Self.dtype](
+            count - Scalar[DType.int64](self.ddof)
+        )
         if variance < 0.0:
             variance = 0.0
         comptime if Self.take_sqrt:
-            output.write_span()[0] = sqrt(variance).cast[Self.dtype]()
+            output.write_span()[0] = sqrt(variance)
         else:
-            output.write_span()[0] = variance.cast[Self.dtype]()
+            output.write_span()[0] = variance

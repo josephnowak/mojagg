@@ -12,6 +12,7 @@ quantile that sort or otherwise mutate worker-private storage.
 """
 
 from max.algorithm import parallelize
+from std.collections import Array
 from std.memory import alloc, dealloc
 from std.memory.alloc import Layout as AllocLayout
 from std.sys import size_of
@@ -77,7 +78,7 @@ def execute_range[
     worker_id: Int,
     scratch_base: Int,
     scratch_stride: Int,
-    scratch_offsets: InlineArray[Int, len(Args)],
+    scratch_offsets: Array[Int, len(Args)],
 ):
     """Run a contiguous outer-index range with one worker's state."""
     # One descriptor copy per worker. The loop only rebinds its address and
@@ -113,7 +114,7 @@ def execute_serial_or_parallel[
     tasks: Int,
     scratch_base: Int,
     scratch_stride: Int,
-    scratch_offsets: InlineArray[Int, len(Args)],
+    scratch_offsets: Array[Int, len(Args)],
 ):
     """Choose serial execution or copy state into parallel workers."""
     if tasks <= 1:
@@ -185,7 +186,7 @@ def guvectorize[
     if plan.outer_count == 0:
         return
 
-    var scratch_offsets = InlineArray[Int, len(Args)](fill=0)
+    var scratch_offsets = Array[Int, len(Args)](fill=0)
     var inner_length = max_input_core_length[*Args](plan)
     var workers = policy.effective_workers(plan.outer_count, inner_length)
     var scratch_stride = 0

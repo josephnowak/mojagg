@@ -42,8 +42,8 @@ class MojaggConfig:
     # Parallel kicks in only when the outer loop has at least
     # ``parallel_min_groups`` iterations and each input core has at least this
     # many elements.
-    parallel_threshold: int = 200_000
-    parallel_min_groups: int = 16
+    parallel_threshold: int = 100_000
+    parallel_min_groups: int = 8
     gpu_min_bytes: int = 1 << 26  # 64 MiB
     simd_width: int = 0  # 0 = native
 

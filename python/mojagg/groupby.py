@@ -21,8 +21,8 @@ _GROUP_VALUE_TYPES = (
     (np.dtype(np.int64), "i64"),
     (np.dtype(np.int32), "i32"),
 )
-# numbagg marks these grouped reductions as supports_ints=False.  Integer
-# values are promoted at this boundary so native kernels receive only f32/f64.
+# Native kernels for these reductions operate on floating-point accumulators.
+# Integer means are cast back after reduction to match numbagg's integer result.
 _GROUP_FLOAT64_PROMOTIONS = {"group_nanmean", "group_nanvar", "group_nanstd"}
 _GROUP_FLOAT_VALUE_TYPES = _GROUP_VALUE_TYPES[:2]
 _GROUP_LABEL_TYPES = (
@@ -100,10 +100,10 @@ def _prepare_group_call(values, labels, axis, num_labels, op_name):
     labels_arr = np.asarray(labels)
     if not values_arr.dtype.isnative or not labels_arr.dtype.isnative:
         raise TypeError("grouped operations require native-endian values and labels")
+    if not np.issubdtype(labels_arr.dtype, np.integer):
+        raise TypeError(f"group labels do not support dtype {labels_arr.dtype}; supported: integer")
     if labels_arr.dtype not in (np.dtype(np.int32), np.dtype(np.int64)):
-        raise TypeError(
-            f"group labels do not support dtype {labels_arr.dtype}; supported: int32, int64"
-        )
+        labels_arr = labels_arr.astype(np.int64)
     if values_arr.dtype == np.dtype(np.bool_):
         if op_name not in _GROUP_BOOL_SUPPORTED:
             raise TypeError(
@@ -118,6 +118,11 @@ def _prepare_group_call(values, labels, axis, num_labels, op_name):
         # path. The promotion is visible at the Python boundary; kernels only
         # see their actual accumulation dtype.
         values_arr = values_arr.astype(np.float64)
+    elif np.issubdtype(values_arr.dtype, np.integer) and values_arr.dtype not in (
+        np.dtype(np.int32),
+        np.dtype(np.int64),
+    ):
+        values_arr = values_arr.astype(np.int32)
     if values_arr.dtype not in _GROUP_KERNELS[op_name]:
         supported = ", ".join(str(dtype) for dtype in _GROUP_KERNELS[op_name])
         raise TypeError(
@@ -161,17 +166,23 @@ def _resolve_num_labels(labels: np.ndarray, num_labels) -> int:
 
 
 def _group_reduce(op_name, values, labels, axis=None, num_labels=None, *, ddof=1):
+    original_dtype = np.asarray(values).dtype
     values_arr, labels_arr, axes, nlabels = _prepare_group_call(
         values, labels, axis, num_labels, op_name
     )
     cfg = get_config()
-    return _GROUP_KERNELS[op_name][values_arr.dtype][labels_arr.dtype](
+    result = _GROUP_KERNELS[op_name][values_arr.dtype][labels_arr.dtype](
         values_arr,
         labels_arr,
         axes,
         nlabels,
         (cfg, int(ddof)),
     )
+    if op_name == "group_nanmean" and np.issubdtype(original_dtype, np.integer):
+        integer_min = np.iinfo(original_dtype).min
+        with np.errstate(invalid="ignore", over="ignore"):
+            return np.where(np.isnan(result), integer_min, result).astype(original_dtype)
+    return result
 
 
 def group_nansum(values, labels, *, axis=None, num_labels=None):
@@ -257,6 +268,34 @@ def group_nansum_of_squares(values, labels, *, axis=None, num_labels=None):
         axis=axis,
         num_labels=num_labels,
     )
+
+
+# Match the metadata exposed by numbagg's ``groupndreduce`` wrappers.  The
+# upstream grouped test suite uses these attributes during collection and for
+# dtype capability checks.
+for _group_function in (
+    group_nanall,
+    group_nanany,
+    group_nanargmax,
+    group_nanargmin,
+    group_nancount,
+    group_nanfirst,
+    group_nanlast,
+    group_nanmax,
+    group_nanmean,
+    group_nanmin,
+    group_nanprod,
+    group_nansum,
+    group_nansum_of_squares,
+):
+    _group_function.supports_bool = True
+    _group_function.supports_ints = True
+    _group_function.supports_ddof = False
+
+for _group_function in (group_nanvar, group_nanstd):
+    _group_function.supports_bool = False
+    _group_function.supports_ints = False
+    _group_function.supports_ddof = True
 
 
 __all__ = [

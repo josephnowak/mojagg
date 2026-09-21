@@ -170,10 +170,10 @@ def test_group_nansum_multiaxis_and_strided():
     )
 
 
-def test_group_nansum_requires_dense_supported_labels():
+def test_group_nansum_accepts_integer_label_widths():
     values = np.ones(4, dtype=np.float64)
-    with pytest.raises(TypeError, match="group labels"):
-        mojagg.group_nansum(values, np.array([0, 1, 2, 3], dtype=np.int16))
+    labels = np.array([0, 1, 2, 3], dtype=np.int16)
+    np.testing.assert_allclose(mojagg.group_nansum(values, labels), values)
 
 
 def test_group_nansum_skips_negative_labels():
@@ -293,6 +293,8 @@ def test_group_remaining_functions_parity(function_name, dtype, label_dtype):
 
     actual = getattr(mojagg, function_name)(values, labels, **kwargs)
     expected = _numbagg_group_result(function_name, values, labels, **kwargs)
+    if function_name == "group_nanmean" and np.issubdtype(dtype, np.integer):
+        expected = expected.astype(dtype)
 
     assert actual.dtype == expected.dtype
     assert actual.shape == expected.shape
@@ -379,21 +381,14 @@ def test_group_boolean_input_rejected_for_float_only_functions(function_name):
 
 
 @pytest.mark.parametrize("dtype", [np.int32, np.int64])
-def test_group_nanmean_integer_input_promotes_to_float64(dtype):
+def test_group_nanmean_integer_input_matches_numbagg(dtype):
     values = np.array([3, 2, -2, 5, 1], dtype=dtype)
     labels = np.array([0, 0, 1, 1, 2], dtype=np.int32)
 
     actual = mojagg.group_nanmean(values, labels, num_labels=4)
-    expected = _numbagg_group_result(
-        "group_nanmean",
-        values,
-        labels,
-        num_labels=4,
-    )
+    expected = np.array([2, 1, 1, np.iinfo(dtype).min], dtype=dtype)
 
-    assert actual.dtype == np.dtype(np.float64)
-    assert actual.dtype == expected.dtype
-    np.testing.assert_allclose(actual, expected, equal_nan=True)
+    np.testing.assert_array_equal(actual, expected)
 
 
 @pytest.mark.parametrize(
@@ -415,6 +410,27 @@ def test_group_extrema_ties_and_all_nan_parity(function_name):
         values,
         labels,
         num_labels=4,
+    )
+
+    assert actual.dtype == expected.dtype
+    np.testing.assert_allclose(actual, expected, equal_nan=True)
+
+
+@pytest.mark.parametrize("function_name", ["group_nanargmin", "group_nanargmax"])
+@pytest.mark.parametrize("dtype", [np.float32, np.float64])
+def test_group_arg_extrema_nan_and_infinity_parity(function_name, dtype):
+    values = np.array(
+        [np.nan, np.inf, -np.inf, np.inf, -np.inf, 3.0, np.nan],
+        dtype=dtype,
+    )
+    labels = np.array([0, 0, 0, 1, 1, 1, 2], dtype=np.int32)
+
+    actual = getattr(mojagg, function_name)(values, labels, num_labels=3)
+    expected = _numbagg_group_result(
+        function_name,
+        values,
+        labels,
+        num_labels=3,
     )
 
     assert actual.dtype == expected.dtype

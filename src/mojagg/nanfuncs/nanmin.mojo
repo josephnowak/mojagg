@@ -36,7 +36,7 @@ def nan_extreme_contiguous[
     runtime branching or dtype-specific logic.
     """
 
-    comptime width = simd_width_of[dtype]() * 8
+    comptime width = simd_width_of[dtype]()
     var identity = pos_inf_or_max[dtype]() if is_min else neg_inf_or_min[
         dtype
     ]()
@@ -74,7 +74,7 @@ def nan_extreme_contiguous[
         comptime if dtype.is_floating_point():
             has_valid_mask |= is_better
 
-    vectorize[width](len(values), step)
+    vectorize[width, unroll_factor=1](len(values), step)
     var result = (
         accumulator.reduce_min() if is_min else accumulator.reduce_max()
     )

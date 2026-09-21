@@ -34,12 +34,14 @@ test = [
     "numbagg>=0.3",
     "pandas>=2.0",
     "pytest>=8",
+    "xarray>=2024.1",
 ]
 dev = [
     "ruff>=0.8",
     "pytest>=8",
     "numbagg>=0.3",
     "pandas>=2.0",
+    "xarray>=2024.1",
 ]
 
 [project.urls]

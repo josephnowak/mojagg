@@ -100,12 +100,17 @@ def test_move_sum_validates_window_and_min_count():
         mojagg.move_sum(values, window=3, axis=(0, 0))
 
 
-def test_move_sum_float32_repeated_window_is_stable():
+def test_move_sum_float32_repeated_window_matches_numbagg():
     random = np.random.RandomState(0)
     values = np.tile((random.rand(10) * 1e13).astype(np.float32), 100)
     result = mojagg.move_sum(values, window=10)
-    expected = np.sum(values[:10])
-    assert result[-1] == expected
+    expected = _numbagg_move_sum(
+        values,
+        window=10,
+        min_count=None,
+        axis=-1,
+    )
+    np.testing.assert_allclose(result, expected, equal_nan=True)
 
 
 def test_move_sum_float16_promotes_to_float32():

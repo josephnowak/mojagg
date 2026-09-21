@@ -13,7 +13,7 @@ the requested logical order. Writable cores are rejected at plan time when
 they cannot be consumed as a direct contiguous span.
 """
 
-from std.collections import InlineArray
+from std.collections import Array
 
 from mojagg.drivers.guvectorize_layout import (
     DimArray,
@@ -48,14 +48,12 @@ struct GUVectorizePlan[NUM_TENSORS: Int](Copyable):
     var outer_rank: Int
     var outer_count: Int
     var outer_shape: DimArray
-    var operands: InlineArray[OperandPlan, Self.NUM_TENSORS]
+    var operands: Array[OperandPlan, Self.NUM_TENSORS]
 
     @staticmethod
     def resolve_broadcast[
         *Args: AnyGUTensor,
-    ](
-        plans: InlineArray[OperandPlan, Self.NUM_TENSORS],
-    ) raises -> BroadcastDomain:
+    ](plans: Array[OperandPlan, Self.NUM_TENSORS],) raises -> BroadcastDomain:
         """Resolve only input outer shapes using right-aligned broadcasting.
 
         Outputs are deliberately excluded here. They are checked against the
@@ -117,6 +115,11 @@ struct GUVectorizePlan[NUM_TENSORS: Int](Copyable):
         if Args[index].is_output:
             core_rank = output_axes.count
             axes = output_axes.values.copy()
+        elif Args[index].core_spec.rank == 0:
+            # A scalar read operand has no selected core axes.  Its outer
+            # shape participates in normal gufunc broadcasting while the
+            # operation receives a one-element span for the scalar value.
+            core_rank = 0
         if core_rank < 0 or core_rank > rank:
             raise Error("invalid core rank")
         if not Args[index].is_output and not tensor.bound:
@@ -128,7 +131,7 @@ struct GUVectorizePlan[NUM_TENSORS: Int](Copyable):
         plan.outer_rank = rank - core_rank
         plan.core_length = 1
         plan.outer_count = 1
-        var selected = InlineArray[Bool, MAX_RANK](fill=False)
+        var selected = Array[Bool, MAX_RANK](fill=False)
         for axis in range(rank):
             plan.shape[axis] = tensor.shape[axis]
             plan.stride[axis] = tensor.stride[axis]
@@ -190,7 +193,7 @@ struct GUVectorizePlan[NUM_TENSORS: Int](Copyable):
         if Args[0].is_output:
             raise Error("the first tensor must be a read input")
 
-        var plans = InlineArray[OperandPlan, Self.NUM_TENSORS](
+        var plans = Array[OperandPlan, Self.NUM_TENSORS](
             fill=OperandPlan.empty()
         )
         comptime for i in range(Self.NUM_TENSORS):
@@ -252,11 +255,11 @@ struct CoreBindings(Copyable):
     """Runtime values resolved for symbolic core dimensions."""
 
     var values: DimArray
-    var bound: InlineArray[Bool, MAX_RANK]
+    var bound: Array[Bool, MAX_RANK]
 
     @staticmethod
     def empty() -> Self:
-        return Self(DimArray(fill=0), InlineArray[Bool, MAX_RANK](fill=False))
+        return Self(DimArray(fill=0), Array[Bool, MAX_RANK](fill=False))
 
     @always_inline
     def bind(mut self, symbol: Int, extent: Int) raises:
@@ -335,7 +338,7 @@ def _build_signature_plan[
     ), "tensor tuple does not match the kernel signature"
     comptime assert len(Args) > 1, "a gufunc needs an input and an output"
 
-    var plans = InlineArray[OperandPlan, len(Args)](fill=OperandPlan.empty())
+    var plans = Array[OperandPlan, len(Args)](fill=OperandPlan.empty())
     var empty_output_axes = AxisSpec.empty()
 
     # Build plans for bound inputs first. Outputs are unbound templates and
@@ -354,7 +357,11 @@ def _build_signature_plan[
     comptime for i in range(len(Args)):
         comptime if not Args[i].is_output:
             var logical_core_shape = DimArray(fill=1)
-            if Args[i].core_spec.rank == input_axes.count:
+            if Args[i].core_spec.rank == 0:
+                # Scalar inputs have no symbolic core dimensions.  Their
+                # scalar core is broadcast through the outer domain below.
+                pass
+            elif Args[i].core_spec.rank == input_axes.count:
                 for core_axis in range(input_axes.count):
                     logical_core_shape[core_axis] = plans[i].core_shape[
                         core_axis
@@ -405,7 +412,7 @@ def _build_signature_plan[
                 raise Error("output rank exceeds guvectorize capacity")
 
             var output_shape = DimArray(fill=1)
-            var selected = InlineArray[Bool, MAX_RANK](fill=False)
+            var selected = Array[Bool, MAX_RANK](fill=False)
             for core_axis in range(physical_core_rank):
                 var axis = output_axes[core_axis]
                 if axis < 0 or axis >= output_rank or selected[axis]:

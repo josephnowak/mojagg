@@ -96,7 +96,7 @@ def _move_cov_pair_full_final[
 ):
     """Finalize a full window with the static matrix reduction order."""
 
-    comptime width = simd_width_of[dtype]()
+    comptime width = 1
     var source_ptr = source.unsafe_ptr()
     var count_lanes = SIMD[DType.float64, width](0.0)
     var sum_i_lanes = SIMD[DType.float64, width](0.0)
@@ -176,7 +176,7 @@ def _move_corr_pair_full_final[
 ):
     """Finalize a full window with the static matrix reduction order."""
 
-    comptime width = simd_width_of[dtype]()
+    comptime width = 1
     var source_ptr = source.unsafe_ptr()
     var count_lanes = SIMD[DType.float64, width](0.0)
     var sum_i_lanes = SIMD[DType.float64, width](0.0)

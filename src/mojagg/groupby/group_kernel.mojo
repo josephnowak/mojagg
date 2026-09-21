@@ -6,6 +6,9 @@ from mojagg.drivers.guvectorize import GUFuncKernel
 comptime GROUP_INIT_ZERO = 0
 comptime GROUP_INIT_ONE = 1
 comptime GROUP_INIT_NAN_OR_ZERO = 2
+comptime GROUP_INIT_NAN_OR_POS_INF = 3
+comptime GROUP_INIT_NAN_OR_NEG_INF = 4
+comptime GROUP_INIT_NAN_OR_NEG_ONE = 5
 
 
 trait GroupKernel(GUFuncKernel):

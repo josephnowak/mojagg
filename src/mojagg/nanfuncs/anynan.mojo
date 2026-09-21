@@ -28,20 +28,19 @@ struct AnyNan[dtype: DType](GUFuncKernel, ImplicitlyCopyable):
         var n = len(values)
 
         comptime if Self.dtype.is_floating_point():
-            comptime width = simd_width_of[Self.dtype]() * 8
+            comptime width = simd_width_of[Self.dtype]()
             var pointer = values.unsafe_ptr()
-            var i = 0
-            while i + width <= n and not result:
+            var vector_end = n - (n % width)
+            for i in range(0, vector_end, width):
                 var block = pointer.unsafe_load[width=width](i)
                 if isnan(block).reduce_or():
                     result = True
                     break
-                i += width
-            while i < n and not result:
-                if isnan(pointer[unsafe_offset=i]):
-                    result = True
-                    break
-                i += 1
+            if not result:
+                for i in range(vector_end, n):
+                    if isnan(pointer[unsafe_offset=i]):
+                        result = True
+                        break
         else:
             # Integer values cannot be NaN.
             result = False

@@ -39,19 +39,20 @@ struct GroupNanSum[
         label_value: Scalar[Self.label_t],
         value: Scalar[Self.value_t],
     ):
-        comptime assert Self.power >= 0, "group power must be non-negative"
         var label = Int(label_value)
-        if label < 0:
-            return
+        var powered_value: Scalar[Self.value_t]
         comptime if Self.value_t.is_floating_point():
-            if isnan(value):
-                return
-        comptime if Self.power == 0:
-            destination[unsafe_offset=label] += Scalar[Self.value_t](1)
-        elif Self.power == 1:
-            destination[unsafe_offset=label] += value
+            var value_block = SIMD[Self.value_t, 1](value)
+            var clean_value = isnan(value_block).select(
+                SIMD[Self.value_t, 1](0), value_block
+            )[0]
+            powered_value = clean_value
         else:
-            destination[unsafe_offset=label] += pow(value, Self.power)
+            powered_value = value
+        comptime if Self.power == 1:
+            destination[unsafe_offset=label] += powered_value
+        else:
+            destination[unsafe_offset=label] += pow(powered_value, Self.power)
 
     @always_inline
     def __call__(mut self, tensors: Self.Signature):
@@ -63,7 +64,7 @@ struct GroupNanSum[
         # Group scatter stores are scalar because each label selects an
         # arbitrary destination.  Load value/label pairs in SIMD blocks and
         # keep only the unavoidable per-lane scatter scalar.
-        comptime width = simd_width_of[Self.value_t]() * 8
+        comptime width = 2
         var value_ptr = values.unsafe_ptr()
         var label_ptr = labels.unsafe_ptr()
         var destination_ptr = destination.unsafe_ptr()
@@ -82,10 +83,13 @@ struct GroupNanSum[
                 label_ptr, i, evl, Scalar[Self.label_t](-1)
             )
             comptime for lane in range(width):
+                var label = label_block[lane]
+                if label < 0:
+                    continue
                 Self._add_lane(
                     destination_ptr,
-                    label_block[lane],
+                    label,
                     value_block[lane],
                 )
 
-        vectorize[width](len(values), step)
+        vectorize[width, unroll_factor=8](len(values), step)
