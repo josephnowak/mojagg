@@ -7,8 +7,11 @@ and upstream test suites execute against mojagg's Mojo kernels directly.
 from __future__ import annotations
 
 import sys
+import types
 from collections.abc import Generator
 from contextlib import contextmanager
+from functools import wraps
+from importlib.machinery import ModuleSpec
 from typing import Any
 
 import mojagg
@@ -70,9 +73,52 @@ _REGISTERED_NAMES = [
 _ORIGINAL_NUMBAGG: dict[str, Any] = {}
 _ORIGINAL_FUNCS: dict[str, Any] = {}
 _ORIGINAL_GROUPED: dict[str, Any] = {}
+_ORIGINAL_MODULES: dict[str, dict[str, Any]] = {}
+_ORIGINAL_XARRAY: dict[str, Any] = {}
+_ORIGINAL_XARRAY_ROLLING: dict[str, tuple[Any, Any]] = {}
+_SHIM_MODULES: set[str] = set()
 _ORIGINAL_LISTS: dict[str, list[Any]] = {}
 _COMPARISONS_BY_NAME: dict[str, Any] = {}
 _IS_REGISTERED = False
+
+_MODULE_NAMES = {
+    "numbagg.moving": (
+        "move_corr",
+        "move_corrmatrix",
+        "move_cov",
+        "move_covmatrix",
+        "move_mean",
+        "move_std",
+        "move_sum",
+        "move_var",
+    ),
+    "numbagg.moving_exp": (
+        "move_exp_nancorr",
+        "move_exp_nancount",
+        "move_exp_nancov",
+        "move_exp_nanmean",
+        "move_exp_nanstd",
+        "move_exp_nansum",
+        "move_exp_nanvar",
+    ),
+    "numbagg.moving_matrix": (
+        "move_corrmatrix",
+        "move_covmatrix",
+        "move_exp_nancorrmatrix",
+        "move_exp_nancovmatrix",
+    ),
+}
+
+# xarray normally imports these operations from ``numbagg`` at call time, so
+# replacing the numbagg module is sufficient.  Its nanops implementation of
+# nansum is the exception: it uses ``sum_where`` directly and never looks up
+# numbagg.nansum.
+_XARRAY_NANOPS_DIRECT = ("nansum",)
+_XARRAY_ROLLING_FUNCS = {
+    "sum": "move_sum",
+    "std": "move_std",
+    "var": "move_var",
+}
 
 
 def register(target: Any = None) -> None:
@@ -93,9 +139,12 @@ def register(target: Any = None) -> None:
     if target is None:
         try:
             import numbagg
-        except ImportError:
-            return
-        target = numbagg
+        except ModuleNotFoundError as exc:
+            if exc.name != "numbagg":
+                raise
+            target = _create_numbagg_shim()
+        else:
+            target = numbagg
 
     # Backup and replace top-level attributes
     for name in _REGISTERED_NAMES:
@@ -118,6 +167,19 @@ def register(target: Any = None) -> None:
     except Exception:
         pass
 
+    # Patch family modules as well as the top-level re-exports. Consumers often
+    # import moving operations directly from these modules.
+    for module_name, names in _MODULE_NAMES.items():
+        try:
+            module = __import__(module_name, fromlist=["*"])
+            originals = _ORIGINAL_MODULES.setdefault(module_name, {})
+            for name in names:
+                if hasattr(mojagg, name) and hasattr(module, name):
+                    originals[name] = getattr(module, name)
+                    setattr(module, name, getattr(mojagg, name))
+        except Exception:
+            pass
+
     # Patch numbagg.grouped for the grouped upstream tests and consumers.
     try:
         import numbagg.grouped as grouped_mod
@@ -129,12 +191,55 @@ def register(target: Any = None) -> None:
     except Exception:
         pass
 
+    # Patch xarray paths that bypass its normal dynamic numbagg lookup.  The
+    # wrapper deliberately resolves the target attribute on every call so a
+    # downstream caller can still patch numbagg.nansum after registration.
+    try:
+        import xarray.computation.nanops as xarray_nanops
+
+        for name in _XARRAY_NANOPS_DIRECT:
+            if not hasattr(xarray_nanops, name) or not hasattr(target, name):
+                continue
+            original = getattr(xarray_nanops, name)
+            _ORIGINAL_XARRAY[name] = original
+
+            @wraps(original)
+            def registered_nanop(*args: Any, _name=name, **kwargs: Any) -> Any:
+                return getattr(target, _name)(*args, **kwargs)
+
+            setattr(xarray_nanops, name, registered_nanop)
+    except Exception:
+        pass
+
+    # Xarray creates rolling methods with the numbagg function captured in a
+    # closure at module import time. Update those cached references as well.
+    try:
+        import xarray.computation.rolling as xarray_rolling
+
+        for method_name, numbagg_name in _XARRAY_ROLLING_FUNCS.items():
+            if not hasattr(mojagg, numbagg_name):
+                continue
+            method = getattr(xarray_rolling.Rolling, method_name, None)
+            if method is None or method.__closure__ is None:
+                continue
+            for cell in method.__closure__:
+                if cell.cell_contents is getattr(target, numbagg_name, None):
+                    _ORIGINAL_XARRAY_ROLLING[method_name] = (
+                        cell,
+                        cell.cell_contents,
+                    )
+                    cell.cell_contents = getattr(mojagg, numbagg_name)
+                    break
+    except Exception:
+        pass
+
     # Patch collection lists
     for list_name in (
         "AGGREGATION_FUNCS",
         "GROUPED_FUNCS",
         "OTHER_FUNCS",
         "MATRIX_FUNCS",
+        "MOVE_FUNCS",
         "MOVE_EXP_FUNCS",
         "MOVE_MATRIX_FUNCS",
         "MOVE_EXP_MATRIX_FUNCS",
@@ -153,6 +258,54 @@ def register(target: Any = None) -> None:
         pass
 
     _IS_REGISTERED = True
+
+
+def _create_numbagg_shim() -> types.ModuleType:
+    """Create an importable numbagg-compatible module tree without numbagg."""
+    target = types.ModuleType("numbagg", "mojagg compatibility shim for numbagg")
+    target.__version__ = mojagg.__version__
+    target.__path__ = []
+    target.__spec__ = ModuleSpec("numbagg", loader=None, is_package=True)
+    sys.modules["numbagg"] = target
+    _SHIM_MODULES.add("numbagg")
+
+    for name in _REGISTERED_NAMES:
+        if hasattr(mojagg, name):
+            setattr(target, name, getattr(mojagg, name))
+
+    for list_name in (
+        "AGGREGATION_FUNCS",
+        "GROUPED_FUNCS",
+        "OTHER_FUNCS",
+        "MATRIX_FUNCS",
+        "MOVE_FUNCS",
+        "MOVE_EXP_FUNCS",
+        "MOVE_MATRIX_FUNCS",
+        "MOVE_EXP_MATRIX_FUNCS",
+    ):
+        setattr(target, list_name, list(getattr(mojagg, list_name)))
+
+    funcs = _create_shim_module("numbagg.funcs", _REGISTERED_NAMES)
+    grouped = _create_shim_module("numbagg.grouped", _REGISTERED_NAMES)
+    target.funcs = funcs
+    target.grouped = grouped
+
+    for module_name, names in _MODULE_NAMES.items():
+        module = _create_shim_module(module_name, names)
+        setattr(target, module_name.rsplit(".", 1)[1], module)
+
+    return target
+
+
+def _create_shim_module(module_name: str, names: tuple[str, ...] | list[str]) -> types.ModuleType:
+    module = types.ModuleType(module_name, "mojagg compatibility shim for numbagg")
+    module.__spec__ = ModuleSpec(module_name, loader=None)
+    for name in names:
+        if hasattr(mojagg, name):
+            setattr(module, name, getattr(mojagg, name))
+    sys.modules[module_name] = module
+    _SHIM_MODULES.add(module_name)
+    return module
 
 
 def _patch_conftest(conftest: Any) -> None:
@@ -201,6 +354,20 @@ def unregister() -> None:
         for name, fn in _ORIGINAL_GROUPED.items():
             setattr(grouped_mod, name, fn)
 
+    if "xarray.computation.nanops" in sys.modules:
+        xarray_nanops = sys.modules["xarray.computation.nanops"]
+        for name, fn in _ORIGINAL_XARRAY.items():
+            setattr(xarray_nanops, name, fn)
+
+    for cell, fn in _ORIGINAL_XARRAY_ROLLING.values():
+        cell.cell_contents = fn
+
+    for module_name, originals in _ORIGINAL_MODULES.items():
+        if module_name in sys.modules:
+            module = sys.modules[module_name]
+            for name, fn in originals.items():
+                setattr(module, name, fn)
+
     if "numbagg.test.conftest" in sys.modules:
         conftest = sys.modules["numbagg.test.conftest"]
         if hasattr(conftest, "COMPARISONS"):
@@ -214,9 +381,16 @@ def unregister() -> None:
                 if hasattr(mojagg, name):
                     conftest.COMPARISONS.pop(getattr(mojagg, name), None)
 
+    for module_name in _SHIM_MODULES:
+        sys.modules.pop(module_name, None)
+
     _ORIGINAL_NUMBAGG.clear()
     _ORIGINAL_FUNCS.clear()
     _ORIGINAL_GROUPED.clear()
+    _ORIGINAL_MODULES.clear()
+    _ORIGINAL_XARRAY.clear()
+    _ORIGINAL_XARRAY_ROLLING.clear()
+    _SHIM_MODULES.clear()
     _ORIGINAL_LISTS.clear()
     _IS_REGISTERED = False
 

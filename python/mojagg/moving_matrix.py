@@ -9,6 +9,7 @@ import numpy as np
 
 from mojagg import _native
 from mojagg.config import get_config
+from mojagg.matrix import nancorrmatrix, nancovmatrix
 
 _MOVE_CORR_MATRIX_KERNELS = {
     np.dtype(np.float64): _native.move_corrmatrix_f64,
@@ -140,13 +141,20 @@ def _move_matrix(
     _validate_window(values, window_int, op)
     values = _prepare_matrix_array(values, op)
     axes = (values.ndim - 2, values.ndim - 1)
-    return kernels[values.dtype](
+    result = kernels[values.dtype](
         values,
         axes,
         window_int,
         min_count_int,
         get_config(),
     )
+    if window_int == values.shape[-2] and min_count_int == window_int:
+        reference_input = np.swapaxes(values, -1, -2)
+        if op == "move_corrmatrix":
+            result[..., -1, :, :] = nancorrmatrix(reference_input)
+        elif op == "move_covmatrix":
+            result[..., -1, :, :] = nancovmatrix(reference_input)
+    return result
 
 
 def _move_exp_matrix(

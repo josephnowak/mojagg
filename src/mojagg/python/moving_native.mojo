@@ -17,16 +17,33 @@ from mojagg.moving.move_corr import MoveCorrKernel
 from mojagg.moving.move_cov import MoveCovKernel
 from mojagg.moving.move_corrmatrix import MoveCorrMatrixKernel
 from mojagg.moving.move_covmatrix import MoveCovMatrixKernel
-from mojagg.moving.move_exp_nancorr import MoveExpNanCorrKernel
-from mojagg.moving.move_exp_nancount import MoveExpNanCountKernel
+from mojagg.moving.move_exp_nancorr import (
+    MoveExpNanCorrKernel,
+    MoveExpNanCorrScalarKernel,
+)
+from mojagg.moving.move_exp_nancount import (
+    MoveExpNanCountKernel,
+    MoveExpNanCountScalarKernel,
+)
 from mojagg.moving.move_exp_nancorrmatrix import MoveExpNanCorrMatrixKernel
-from mojagg.moving.move_exp_nancov import MoveExpNanCovKernel
+from mojagg.moving.move_exp_nancov import (
+    MoveExpNanCovKernel,
+    MoveExpNanCovScalarKernel,
+)
 from mojagg.moving.move_exp_nancovmatrix import MoveExpNanCovMatrixKernel
-from mojagg.moving.move_exp_nanmean import MoveExpNanMeanKernel
-from mojagg.moving.move_exp_nansum import MoveExpNanSumKernel
+from mojagg.moving.move_exp_nanmean import (
+    MoveExpNanMeanKernel,
+    MoveExpNanMeanScalarKernel,
+)
+from mojagg.moving.move_exp_nansum import (
+    MoveExpNanSumKernel,
+    MoveExpNanSumScalarKernel,
+)
 from mojagg.moving.move_exp_nanvar import (
     MoveExpNanStdKernel,
+    MoveExpNanStdScalarKernel,
     MoveExpNanVarKernel,
+    MoveExpNanVarScalarKernel,
 )
 from mojagg.moving.move_mean import MoveMeanKernel
 from mojagg.moving.move_sum import MoveSumKernel
@@ -392,6 +409,54 @@ def _apply_exp_unary[
     return outputs[0]
 
 
+def _apply_exp_unary_scalar[
+    dtype: DType,
+    Op: GUFuncKernel,
+](
+    arr: PythonObject,
+    alpha: PythonObject,
+    axes: PythonObject,
+    min_weight: PythonObject,
+    cfg: PythonObject,
+    operation: Op,
+    op_name: String,
+) raises -> PythonObject:
+    """Run an exp-moving operation with scalar alpha without core scratch."""
+
+    validate_dtype[dtype](arr, op_name)
+    validate_dtype[dtype](alpha, op_name)
+    var input = borrow_numpy_tensor[
+        dtype,
+        False,
+        CoreSpec[Dim[0]],
+    ](arr)
+    var input_alpha = borrow_numpy_tensor[
+        dtype,
+        False,
+        CoreSpec[],
+    ](alpha)
+    var input_axes = axes_from_py(axes, op_name)
+    if input_axes.count != 1:
+        raise Error(op_name + ": expected exactly one axis")
+
+    var output_axes = AxisSpec.empty()
+    output_axes.count = 1
+    output_axes[0] = input.ndim - 1
+    var signature = Tuple(
+        input,
+        input_alpha,
+        GUTensor[dtype, True, CoreSpec[Dim[0]]].empty(),
+    )
+    var plan = build_signature_plan[Op](
+        signature,
+        input_axes,
+        output_axes,
+    )
+    var outputs = materialize_outputs[Op](signature)
+    guvectorize[Op](operation, signature, plan, dispatch_policy_from_py(cfg))
+    return outputs[0]
+
+
 def _apply_exp_binary[
     dtype: DType,
     Op: GUFuncKernel,
@@ -430,6 +495,62 @@ def _apply_exp_binary[
     # The facade broadcasts the read operands and alpha to one common rank;
     # guvectorize still handles their outer broadcast strides and selected
     # axis alignment without moving the source arrays.
+    var output_axes = AxisSpec.empty()
+    output_axes.count = 1
+    output_axes[0] = input_a.ndim - 1
+    var signature = Tuple(
+        input_a,
+        input_b,
+        input_alpha,
+        GUTensor[dtype, True, CoreSpec[Dim[0]]].empty(),
+    )
+    var plan = build_signature_plan[Op](
+        signature,
+        input_axes,
+        output_axes,
+    )
+    var outputs = materialize_outputs[Op](signature)
+    guvectorize[Op](operation, signature, plan, dispatch_policy_from_py(cfg))
+    return outputs[0]
+
+
+def _apply_exp_binary_scalar[
+    dtype: DType,
+    Op: GUFuncKernel,
+](
+    a: PythonObject,
+    b: PythonObject,
+    alpha: PythonObject,
+    axes: PythonObject,
+    min_weight: PythonObject,
+    cfg: PythonObject,
+    operation: Op,
+    op_name: String,
+) raises -> PythonObject:
+    """Run a binary exp-moving operation with scalar alpha."""
+
+    validate_dtype[dtype](a, op_name)
+    validate_dtype[dtype](b, op_name)
+    validate_dtype[dtype](alpha, op_name)
+    var input_a = borrow_numpy_tensor[
+        dtype,
+        False,
+        CoreSpec[Dim[0]],
+    ](a)
+    var input_b = borrow_numpy_tensor[
+        dtype,
+        False,
+        CoreSpec[Dim[0]],
+    ](b)
+    var input_alpha = borrow_numpy_tensor[
+        dtype,
+        False,
+        CoreSpec[],
+    ](alpha)
+    var input_axes = axes_from_py(axes, op_name)
+    if input_axes.count != 1:
+        raise Error(op_name + ": expected exactly one axis")
+
     var output_axes = AxisSpec.empty()
     output_axes.count = 1
     output_axes[0] = input_a.ndim - 1
@@ -512,6 +633,19 @@ def move_exp_nancount_binding[
     min_weight: PythonObject,
     cfg: PythonObject,
 ) raises -> PythonObject:
+    if alpha.ndim == 0:
+        return _apply_exp_unary_scalar[
+            dtype,
+            MoveExpNanCountScalarKernel[dtype],
+        ](
+            arr,
+            alpha,
+            axes,
+            min_weight,
+            cfg,
+            MoveExpNanCountScalarKernel[dtype](Float64(py=min_weight)),
+            "move_exp_nancount",
+        )
     return _apply_exp_unary[dtype, MoveExpNanCountKernel[dtype]](
         arr,
         alpha,
@@ -532,6 +666,19 @@ def move_exp_nanmean_binding[
     min_weight: PythonObject,
     cfg: PythonObject,
 ) raises -> PythonObject:
+    if alpha.ndim == 0:
+        return _apply_exp_unary_scalar[
+            dtype,
+            MoveExpNanMeanScalarKernel[dtype],
+        ](
+            arr,
+            alpha,
+            axes,
+            min_weight,
+            cfg,
+            MoveExpNanMeanScalarKernel[dtype](Float64(py=min_weight)),
+            "move_exp_nanmean",
+        )
     return _apply_exp_unary[dtype, MoveExpNanMeanKernel[dtype]](
         arr,
         alpha,
@@ -552,6 +699,19 @@ def move_exp_nansum_binding[
     min_weight: PythonObject,
     cfg: PythonObject,
 ) raises -> PythonObject:
+    if alpha.ndim == 0:
+        return _apply_exp_unary_scalar[
+            dtype,
+            MoveExpNanSumScalarKernel[dtype],
+        ](
+            arr,
+            alpha,
+            axes,
+            min_weight,
+            cfg,
+            MoveExpNanSumScalarKernel[dtype](Float64(py=min_weight)),
+            "move_exp_nansum",
+        )
     return _apply_exp_unary[dtype, MoveExpNanSumKernel[dtype]](
         arr,
         alpha,
@@ -572,6 +732,19 @@ def move_exp_nanvar_binding[
     min_weight: PythonObject,
     cfg: PythonObject,
 ) raises -> PythonObject:
+    if alpha.ndim == 0:
+        return _apply_exp_unary_scalar[
+            dtype,
+            MoveExpNanVarScalarKernel[dtype],
+        ](
+            arr,
+            alpha,
+            axes,
+            min_weight,
+            cfg,
+            MoveExpNanVarScalarKernel[dtype](Float64(py=min_weight)),
+            "move_exp_nanvar",
+        )
     return _apply_exp_unary[dtype, MoveExpNanVarKernel[dtype]](
         arr,
         alpha,
@@ -592,6 +765,19 @@ def move_exp_nanstd_binding[
     min_weight: PythonObject,
     cfg: PythonObject,
 ) raises -> PythonObject:
+    if alpha.ndim == 0:
+        return _apply_exp_unary_scalar[
+            dtype,
+            MoveExpNanStdScalarKernel[dtype],
+        ](
+            arr,
+            alpha,
+            axes,
+            min_weight,
+            cfg,
+            MoveExpNanStdScalarKernel[dtype](Float64(py=min_weight)),
+            "move_exp_nanstd",
+        )
     return _apply_exp_unary[dtype, MoveExpNanStdKernel[dtype]](
         arr,
         alpha,
@@ -613,6 +799,20 @@ def move_exp_nancov_binding[
     min_weight: PythonObject,
     cfg: PythonObject,
 ) raises -> PythonObject:
+    if alpha.ndim == 0:
+        return _apply_exp_binary_scalar[
+            dtype,
+            MoveExpNanCovScalarKernel[dtype],
+        ](
+            a,
+            b,
+            alpha,
+            axes,
+            min_weight,
+            cfg,
+            MoveExpNanCovScalarKernel[dtype](Float64(py=min_weight)),
+            "move_exp_nancov",
+        )
     return _apply_exp_binary[dtype, MoveExpNanCovKernel[dtype]](
         a,
         b,
@@ -635,6 +835,20 @@ def move_exp_nancorr_binding[
     min_weight: PythonObject,
     cfg: PythonObject,
 ) raises -> PythonObject:
+    if alpha.ndim == 0:
+        return _apply_exp_binary_scalar[
+            dtype,
+            MoveExpNanCorrScalarKernel[dtype],
+        ](
+            a,
+            b,
+            alpha,
+            axes,
+            min_weight,
+            cfg,
+            MoveExpNanCorrScalarKernel[dtype](Float64(py=min_weight)),
+            "move_exp_nancorr",
+        )
     return _apply_exp_binary[dtype, MoveExpNanCorrKernel[dtype]](
         a,
         b,

@@ -1,10 +1,14 @@
 """Grouped NaN-aware argmin and argmax kernels."""
 
-from std.algorithm import vectorize
+from std.collections import Span
 from std.math import isnan
-from std.sys.info import simd_width_of
 
-from mojagg.core.numeric import load_block_or_identity
+from mojagg.core.numeric import (
+    load_block_or_identity,
+    neg_inf_or_min,
+    pos_inf_or_max,
+)
+from mojagg.core.preallocated import Preallocated
 from mojagg.drivers.guvectorize import (
     CoreSpec,
     Dim,
@@ -13,7 +17,6 @@ from mojagg.drivers.guvectorize import (
 from mojagg.groupby.group_kernel import GroupKernel
 
 
-@fieldwise_init
 struct GroupNanArgMinMax[
     value_t: DType,
     label_t: DType,
@@ -25,54 +28,71 @@ struct GroupNanArgMinMax[
         GUTensor[Self.value_t, False, CoreSpec[Dim[0]]],
         GUTensor[Self.label_t, False, CoreSpec[Dim[0]]],
         GUTensor[Self.value_t, True, CoreSpec[Dim[1]]],
-        GUTensor[Self.value_t, True, CoreSpec[Dim[1]]],
-        GUTensor[DType.int64, True, CoreSpec[Dim[1]]],
     ]
+
+    var preallocated: Preallocated[Self.value_t]
+
+    def __init__(out self):
+        self.preallocated = Preallocated[Self.value_t]()
+
+    def __init__(out self, *, copy: Self):
+        self.preallocated = Preallocated[Self.value_t]()
+
+    @always_inline
+    @staticmethod
+    def _identity() -> Scalar[Self.value_t]:
+        comptime if Self.value_t == DType.bool:
+            return Scalar[Self.value_t](False if Self.is_max else True)
+        else:
+            return neg_inf_or_min[
+                Self.value_t
+            ]() if Self.is_max else pos_inf_or_max[Self.value_t]()
+
+    @always_inline
+    def get_best_ptr(
+        mut self,
+        destination: Span[mut=True, Scalar[Self.value_t], _],
+    ) -> Pointer[mut=True, Scalar[Self.value_t], MutUntrackedOrigin]:
+        return self.preallocated.get_ptr(len(destination), Self._identity())
 
     @always_inline
     @staticmethod
     def _update_lane(
         destination: Pointer[mut=True, Scalar[Self.value_t], _],
         best_values: Pointer[mut=True, Scalar[Self.value_t], _],
-        seen: Pointer[mut=True, Scalar[DType.int64], _],
         label_value: Scalar[Self.label_t],
         value: Scalar[Self.value_t],
         flat_index: Int,
     ):
         var label = Int(label_value)
-        if label < 0:
-            return
-        comptime if Self.value_t.is_floating_point():
-            if isnan(value):
-                return
-        var has_best = seen[unsafe_offset=label] != 0
+        var current = best_values[unsafe_offset=label]
+        var pos = destination[unsafe_offset=label]
 
-        var better = not has_best
-        if has_best:
-            comptime if Self.is_max:
-                better = value > best_values[unsafe_offset=label]
-            else:
-                better = value < best_values[unsafe_offset=label]
-        if better:
-            destination[unsafe_offset=label] = Scalar[Self.value_t](flat_index)
-            best_values[unsafe_offset=label] = value
-            seen[unsafe_offset=label] = 1
+        var should_update: SIMD[DType.bool, 1]
+        comptime if Self.is_max:
+            should_update = value >= current
+        else:
+            should_update = value <= current
+
+        destination[unsafe_offset=label] = should_update.select(
+            Scalar[Self.value_t](flat_index), pos
+        )[0]
+        best_values[unsafe_offset=label] = should_update.select(value, current)[
+            0
+        ]
 
     @always_inline
     def __call__(mut self, tensors: Self.Signature):
-        var value_input, label_input, output, best_output, seen_output = tensors
+        var value_input, label_input, output = tensors
         var values = value_input.read_span()
         var labels = label_input.read_span()
         var destination = output.write_span()
-        var best_values = best_output.write_span()
-        var seen = seen_output.write_span()
+        var best_ptr = self.get_best_ptr(destination)
 
-        comptime width = simd_width_of[Self.value_t]()
+        comptime width = 2
         var value_ptr = values.unsafe_ptr()
         var label_ptr = labels.unsafe_ptr()
         var destination_ptr = destination.unsafe_ptr()
-        var best_ptr = best_values.unsafe_ptr()
-        var seen_ptr = seen.unsafe_ptr()
 
         def step[
             vector_width: Int
@@ -81,7 +101,6 @@ struct GroupNanArgMinMax[
             imm label_ptr,
             imm destination_ptr,
             imm best_ptr,
-            imm seen_ptr,
         }:
             var value_block = load_block_or_identity[Self.value_t, width](
                 value_ptr, i, evl, Scalar[Self.value_t](0)
@@ -89,14 +108,24 @@ struct GroupNanArgMinMax[
             var label_block = load_block_or_identity[Self.label_t, width](
                 label_ptr, i, evl, Scalar[Self.label_t](-1)
             )
-            comptime for lane in range(width):
+            comptime for lane in range(width - 1, -1, -1):
+                var label = label_block[lane]
+                if label < 0:
+                    continue
                 Self._update_lane(
                     destination_ptr,
                     best_ptr,
-                    seen_ptr,
-                    label_block[lane],
+                    label,
                     value_block[lane],
                     i + lane,
                 )
 
-        vectorize[width](len(values), step)
+        var n = len(values)
+        var tail = n % width
+        var tail_start = n - tail
+
+        if tail > 0:
+            step[width](tail_start, tail)
+
+        for i in range(tail_start - width, -1, -width):
+            step[width](i, width)

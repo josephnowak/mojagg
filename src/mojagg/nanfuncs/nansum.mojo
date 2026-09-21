@@ -35,7 +35,6 @@ def nan_sum_powered_block[
 ](values: SIMD[dtype, width]) -> SIMD[dtype, width]:
     """Raise a full SIMD block to a non-negative compile-time power."""
 
-    comptime assert power >= 0, "nansum power must be non-negative"
     comptime if power == 0:
         return SIMD[dtype, width](1)
     elif power == 1:
@@ -57,26 +56,22 @@ def nan_sum_contiguous[
     # Eight independent native-width groups retain the measured reduction
     # throughput of the previous nansum kernel while leaving the driver free
     # to materialize arbitrary input layouts once per slice.
-    comptime width = simd_width_of[dtype]() * 8
+    comptime width = simd_width_of[dtype]()
     var acc = SIMD[dtype, width](0)
+    comptime zero = SIMD[dtype, width](0)
     var pointer = values.unsafe_ptr()
 
     def step[vector_width: Int](i: Int, evl: Int) {imm pointer, mut acc}:
         var block = load_block_or_identity[dtype, width](
             pointer, i, evl, Scalar[dtype](0)
         )
-        comptime if power == 1:
-            comptime if dtype.is_floating_point():
-                acc += isnan(block).select(SIMD[dtype, width](0), block)
-            else:
-                acc += block
+        block = nan_sum_powered_block[dtype, power, width](block)
+        comptime if dtype.is_floating_point():
+            acc += isnan(block).select(zero, block)
         else:
-            var powered = nan_sum_powered_block[dtype, power, width](block)
-            comptime if dtype.is_floating_point():
-                powered = isnan(block).select(SIMD[dtype, width](0), powered)
-            acc += powered
+            acc += block
 
-    vectorize[width](len(values), step)
+    vectorize[width, unroll_factor=1](len(values), step)
     return acc.reduce_add()
 
 

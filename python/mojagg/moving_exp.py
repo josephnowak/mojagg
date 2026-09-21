@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+from functools import update_wrapper
 from typing import Any
 
 import numpy as np
@@ -89,7 +90,11 @@ def _prepare_alpha(
         ) from None
 
     if alpha_arr.ndim == 0:
-        return np.broadcast_to(alpha_arr, shape)
+        # Keep scalar alpha scalar.  The native binding has a dedicated
+        # scalar-core signature, so a broadcast view does not have to be
+        # materialized into a contiguous worker scratch buffer for every
+        # outer slice.
+        return alpha_arr
     if alpha_arr.ndim == 1:
         if alpha_arr.shape[0] != shape[axis]:
             raise ValueError(
@@ -351,6 +356,23 @@ def move_exp_nancorr(
         op="move_exp_nancorr",
         kernels=_MOVE_EXP_NANCORR_KERNELS,
     )
+
+
+class _NumbaggFunction:
+    """Callable metadata wrapper matching numbagg's function representation."""
+
+    def __init__(self, function):
+        self._function = function
+        update_wrapper(self, function)
+
+    def __call__(self, *args, **kwargs):
+        return self._function(*args, **kwargs)
+
+    def __repr__(self):
+        return f"numbagg.{self.__name__}"
+
+
+move_exp_nanmean = _NumbaggFunction(move_exp_nanmean)
 
 
 __all__ = [

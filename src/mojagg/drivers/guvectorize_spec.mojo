@@ -11,12 +11,12 @@ tuple's dtype, read/write flags, and core specs are all part of its compile-time
 type, so the binding and the kernel must use exactly the same tuple order.
 """
 
-from std.collections import InlineArray
+from std.collections import Array
 
 from mojagg.drivers.guvectorize_layout import DimArray, MAX_RANK
 
 
-comptime BoolArray = InlineArray[Bool, MAX_RANK]
+comptime BoolArray = Array[Bool, MAX_RANK]
 
 
 trait CoreDim(Copyable & Deinitable):

@@ -257,6 +257,15 @@ struct GUTensor[
                 target[unsafe_offset=0] = source[unsafe_offset=outer_offset]
                 return
 
+            if plan.core_rank == 1:
+                var source_offset = outer_offset
+                for element in range(plan.core_length):
+                    target[unsafe_offset=element] = source[
+                        unsafe_offset=source_offset
+                    ]
+                    source_offset += plan.core_stride[0]
+                return
+
             var coordinates = DimArray(fill=0)
             var source_offset = outer_offset
             for flat in range(plan.core_length):

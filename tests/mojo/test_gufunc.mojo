@@ -125,7 +125,7 @@ struct ParallelProbeOperation(Copyable, GUFuncKernel):
             Int32,
             MutAnyOrigin,
         ](unsafe_from_address=self.copy_counter_address)
-        _ = Atomic[DType.int32].fetch_add(counter, 1)
+        _ = Atomic[Int32].fetch_add(counter, 1)
 
     @always_inline
     def __call__(mut self, tensors: Self.Signature):

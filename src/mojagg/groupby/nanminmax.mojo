@@ -4,7 +4,12 @@ from std.algorithm import vectorize
 from std.math import isnan
 from std.sys.info import simd_width_of
 
-from mojagg.core.numeric import load_block_or_identity
+from mojagg.core.numeric import (
+    load_block_or_identity,
+    neg_inf_or_min,
+    pos_inf_or_max,
+    nan_or_zero,
+)
 from mojagg.drivers.guvectorize import (
     CoreSpec,
     Dim,
@@ -25,46 +30,45 @@ struct GroupNanMinMax[
         GUTensor[Self.value_t, False, CoreSpec[Dim[0]]],
         GUTensor[Self.label_t, False, CoreSpec[Dim[0]]],
         GUTensor[Self.value_t, True, CoreSpec[Dim[1]]],
-        GUTensor[DType.int64, True, CoreSpec[Dim[1]]],
     ]
 
     @always_inline
     @staticmethod
     def _update_lane(
         destination: Pointer[mut=True, Scalar[Self.value_t], _],
-        seen: Pointer[mut=True, Scalar[DType.int64], _],
         label_value: Scalar[Self.label_t],
         value: Scalar[Self.value_t],
     ):
         var label = Int(label_value)
-        if label < 0:
-            return
-        comptime if Self.value_t.is_floating_point():
-            if isnan(value):
-                return
-        if seen[unsafe_offset=label] == 0:
-            destination[unsafe_offset=label] = value
-            seen[unsafe_offset=label] = 1
-        elif Self.is_max:
-            if value > destination[unsafe_offset=label]:
-                destination[unsafe_offset=label] = value
+        var current = destination[unsafe_offset=label]
+        var should_update: SIMD[DType.bool, 1]
+        comptime if Self.is_max:
+            should_update = value >= current
         else:
-            if value < destination[unsafe_offset=label]:
-                destination[unsafe_offset=label] = value
+            should_update = value <= current
+
+        should_update |= isnan(current)
+        destination[unsafe_offset=label] = should_update.select(value, current)
 
     @always_inline
     def __call__(mut self, tensors: Self.Signature):
-        var value_input, label_input, output, seen_output = tensors
+        var value_input, label_input, output = tensors
         var values = value_input.read_span()
         var labels = label_input.read_span()
         var destination = output.write_span()
-        var seen = seen_output.write_span()
 
-        comptime width = simd_width_of[Self.value_t]() * 8
+        comptime width = 2
         var value_ptr = values.unsafe_ptr()
         var label_ptr = labels.unsafe_ptr()
         var destination_ptr = destination.unsafe_ptr()
-        var seen_ptr = seen.unsafe_ptr()
+        comptime identity = (
+            neg_inf_or_min[Self.value_t]() if Self.is_max else pos_inf_or_max[
+                Self.value_t
+            ]()
+        )
+        comptime identity_block = SIMD[Self.value_t, width](identity)
+        comptime missing_label = Scalar[Self.label_t](-1)
+        comptime empty_value = nan_or_zero[Self.value_t]()
 
         def step[
             vector_width: Int
@@ -72,20 +76,21 @@ struct GroupNanMinMax[
             imm value_ptr,
             imm label_ptr,
             imm destination_ptr,
-            imm seen_ptr,
         }:
             var value_block = load_block_or_identity[Self.value_t, width](
-                value_ptr, i, evl, Scalar[Self.value_t](0)
+                value_ptr, i, evl, empty_value
             )
             var label_block = load_block_or_identity[Self.label_t, width](
-                label_ptr, i, evl, Scalar[Self.label_t](-1)
+                label_ptr, i, evl, missing_label
             )
             comptime for lane in range(width):
+                var label = label_block[lane]
+                if label < 0:
+                    continue
                 Self._update_lane(
                     destination_ptr,
-                    seen_ptr,
-                    label_block[lane],
+                    label,
                     value_block[lane],
                 )
 
-        vectorize[width](len(values), step)
+        vectorize[width, unroll_factor=8](len(values), step)

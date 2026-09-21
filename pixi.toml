@@ -3,7 +3,7 @@ channels = ["https://conda.modular.com/max", "conda-forge"]
 name = "mojagg"
 # linux-64, osx-arm64, and linux-aarch64 are the primary release targets
 platforms = ["linux-64", "osx-arm64", "linux-aarch64"]
-version = "0.1.0"
+version = "0.2.0"
 
 [tasks]
 # Build the native Mojo extension into python/mojagg/_native
@@ -20,8 +20,8 @@ format = { cmd = "ruff format python tests benchmarks scripts && ruff check --fi
 bench-codspeed = "pytest benchmarks/codspeed -q --codspeed"
 
 [dependencies]
-mojo = ">=1.0.0,<2"
-max = ">=26.5.0,<27"
+mojo = ">=1.1.0,<2"
+max = ">=26.6.0,<27"
 python = ">=3.10"
 pip = ">=25"
 setuptools = ">=69"
@@ -33,6 +33,7 @@ numbagg = ">=0.3"      # parity-testing reference
 bottleneck = ">=1.4"
 ruff = ">=0.8"
 pandas = ">=2.0,<4"
+xarray = ">=2024.1"
 
 [target.linux-64.dependencies]
 auditwheel = ">=6"     # manylinux wheel repair

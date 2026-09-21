@@ -20,11 +20,10 @@ from mojagg.nanfuncs.nanmatrix import (
 struct NanCorrOp[dtype: DType](
     GUFuncKernel, ImplicitlyCopyable, MatrixPairwiseOp
 ):
-    comptime value_dtype = Self.dtype
     comptime out_dtype = Self.dtype
     comptime Signature = Tuple[
         GUTensor[
-            Self.value_dtype,
+            Self.out_dtype,
             False,
             CoreSpec[Dim[0], Dim[1]],
         ],
@@ -50,17 +49,19 @@ struct NanCorrOp[dtype: DType](
         p_i: Pointer[mut=False, Scalar[Self.out_dtype], ImmUntrackedOrigin],
         p_j: Pointer[mut=False, Scalar[Self.out_dtype], ImmUntrackedOrigin],
         n_obs: Int,
-        shift_i: Float64,
-        shift_j: Float64,
+        shift_i: Scalar[Self.out_dtype],
+        shift_j: Scalar[Self.out_dtype],
         is_diag: Bool,
-    ) -> PairwiseAcc:
+    ) -> PairwiseAcc[Self.out_dtype]:
         return _accumulate_pair_simd[Self.out_dtype](
             p_i, p_j, n_obs, shift_i, shift_j, is_diag
         )
 
     @always_inline
     @staticmethod
-    def finalize(acc: PairwiseAcc, is_diag: Bool) -> Scalar[Self.out_dtype]:
+    def finalize(
+        acc: PairwiseAcc[Self.out_dtype], is_diag: Bool
+    ) -> Scalar[Self.out_dtype]:
         if acc.count <= 1.0:
             return nan_or_zero[Self.out_dtype]()
         if is_diag:

@@ -35,17 +35,32 @@ struct GroupNanAnyAll[
         value: Scalar[Self.value_t],
     ):
         var label = Int(label_value)
-        if label < 0:
-            return
+        var truth: Bool
         comptime if Self.value_t.is_floating_point():
-            if isnan(value):
-                return
-        comptime if Self.is_all:
-            if not value:
-                destination[unsafe_offset=label] = 0
+            var value_block = SIMD[Self.value_t, 1](value)
+            var zero_block = SIMD[Self.value_t, 1](0)
+            var is_nan = isnan(value_block)[0]
+            var is_nonzero = value_block != zero_block
+            truth = (
+                is_nan
+                or is_nonzero if Self.is_all else not is_nan
+                and is_nonzero
+            )
         else:
-            if value:
-                destination[unsafe_offset=label] = 1
+            truth = value != Scalar[Self.value_t](0)
+        # `all` clears the group on a falsy lane, `any` sets it on a truthy one.
+        var truth_block = SIMD[DType.bool, 1](truth)
+        var destination_block = SIMD[Self.value_t, 1](
+            destination[unsafe_offset=label]
+        )
+        comptime if Self.is_all:
+            destination[unsafe_offset=label] = truth_block.select(
+                destination_block, SIMD[Self.value_t, 1](0)
+            )[0]
+        else:
+            destination[unsafe_offset=label] = truth_block.select(
+                SIMD[Self.value_t, 1](1), destination_block
+            )[0]
 
     @always_inline
     def __call__(mut self, tensors: Self.Signature):
@@ -54,7 +69,7 @@ struct GroupNanAnyAll[
         var labels = label_input.read_span()
         var destination = output.write_span()
 
-        comptime width = simd_width_of[Self.value_t]() * 8
+        comptime width = 2
         var value_ptr = values.unsafe_ptr()
         var label_ptr = labels.unsafe_ptr()
         var destination_ptr = destination.unsafe_ptr()
@@ -73,10 +88,13 @@ struct GroupNanAnyAll[
                 label_ptr, i, evl, Scalar[Self.label_t](-1)
             )
             comptime for lane in range(width):
+                var label = label_block[lane]
+                if label < 0:
+                    continue
                 Self._update_lane(
                     destination_ptr,
-                    label_block[lane],
+                    label,
                     value_block[lane],
                 )
 
-        vectorize[width](len(values), step)
+        vectorize[width, unroll_factor=8](len(values), step)

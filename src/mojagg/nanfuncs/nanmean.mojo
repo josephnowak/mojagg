@@ -17,38 +17,46 @@ from mojagg.drivers.guvectorize import (
 @always_inline
 def nan_mean_contiguous[
     dtype: DType
-](values: Span[Scalar[dtype], ImmUntrackedOrigin]) -> Tuple[Float64, Int64]:
-    """Accumulate a contiguous core with float64 SIMD sum and count."""
+](values: Span[Scalar[dtype], ImmUntrackedOrigin]) -> Tuple[
+    Scalar[dtype], Scalar[DType.int64]
+]:
+    """Accumulate a contiguous core with dtype-native sum and integer count."""
 
-    comptime assert (
-        dtype == DType.float32 or dtype == DType.float64
-    ), "nanmean requires float32 or float64"
-
-    comptime width = simd_width_of[dtype]() * 8
+    comptime width = simd_width_of[dtype]()
     var pointer = values.unsafe_ptr()
-    var total = SIMD[DType.float64, width](0.0)
-    var count = SIMD[DType.float64, width](0.0)
-    var zero = SIMD[DType.float64, width](0.0)
-    var one = SIMD[DType.float64, width](1.0)
+    var total = SIMD[dtype, width](0.0)
+    var count = SIMD[DType.int64, width](0)
+    var value_zero = SIMD[dtype, width](0.0)
+    var count_zero = SIMD[DType.int64, width](0)
+    var one = SIMD[DType.int64, width](1)
 
     def step[
         vector_width: Int
-    ](i: Int, evl: Int) {imm pointer, mut total, mut count, imm zero, imm one}:
+    ](
+        i: Int,
+        evl: Int,
+    ) {
+        imm pointer,
+        mut total,
+        mut count,
+        imm value_zero,
+        imm count_zero,
+        imm one,
+    }:
         var block = load_block_or_identity[dtype, width](
             pointer, i, evl, nan_or_zero[dtype]()
         )
-        var widened = block.cast[DType.float64]()
         var missing = isnan(block)
-        total += missing.select(zero, widened)
-        count += missing.select(zero, one)
+        total += missing.select(value_zero, block)
+        count += missing.select(count_zero, one)
 
-    vectorize[width](len(values), step)
-    return (Float64(total.reduce_add()), Int64(count.reduce_add()))
+    vectorize[width, unroll_factor=1](len(values), step)
+    return (total.reduce_add(), count.reduce_add())
 
 
 @fieldwise_init
 struct NanMean[dtype: DType](GUFuncKernel, ImplicitlyCopyable):
-    """Accumulate in float64 and write the result in the requested dtype."""
+    """Accumulate and write the result in the requested dtype."""
 
     comptime value_dtype = Self.dtype
     comptime out_dtype = Self.dtype
@@ -67,4 +75,4 @@ struct NanMean[dtype: DType](GUFuncKernel, ImplicitlyCopyable):
         if count == 0:
             output.write_span()[0] = nan_or_zero[Self.dtype]()
         else:
-            output.write_span()[0] = (total / Float64(count)).cast[Self.dtype]()
+            output.write_span()[0] = total / Scalar[Self.dtype](count)
