@@ -179,8 +179,9 @@ def _group_reduce(op_name, values, labels, axis=None, num_labels=None, *, ddof=1
         (cfg, int(ddof)),
     )
     if op_name == "group_nanmean" and np.issubdtype(original_dtype, np.integer):
+        integer_min = np.iinfo(original_dtype).min
         with np.errstate(invalid="ignore", over="ignore"):
-            return result.astype(original_dtype)
+            return np.where(np.isnan(result), integer_min, result).astype(original_dtype)
     return result
 
 
