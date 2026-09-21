@@ -35,20 +35,6 @@ struct GroupNanFirst[
         self.seen = Preallocated[DType.bool](copy=copy.seen)
 
     @always_inline
-    @staticmethod
-    def _update_lane(
-        destination: Pointer[mut=True, Scalar[Self.value_t], _],
-        label: Int,
-        value: Scalar[Self.value_t],
-    ):
-        comptime if Self.value_t.is_floating_point():
-            if isnan(value):
-                return
-        # Forward traversal preserves the first valid value because later
-        # stores are prevented by the per-group seen workspace.
-        destination[unsafe_offset=label] = value
-
-    @always_inline
     def __call__(mut self, tensors: Self.Signature):
         var value_input = tensors[0]
         var label_input = tensors[1]
@@ -82,13 +68,12 @@ struct GroupNanFirst[
                     var label = Int(label_block[lane])
                     if label < 0:
                         continue
+                    comptime if Self.value_t.is_floating_point():
+                        if isnan(value_block[lane]):
+                            continue
                     if seen_ptr[unsafe_offset=label]:
                         continue
-                    Self._update_lane(
-                        destination_ptr,
-                        label,
-                        value_block[lane],
-                    )
+                    destination_ptr[unsafe_offset=label] = value_block[lane]
                     seen_ptr[unsafe_offset=label] = True
 
         vectorize[width, unroll_factor=8](len(values), step)

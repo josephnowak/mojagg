@@ -10,6 +10,7 @@ import sys
 import types
 from collections.abc import Generator
 from contextlib import contextmanager
+from functools import wraps
 from importlib.machinery import ModuleSpec
 from typing import Any
 
@@ -73,6 +74,8 @@ _ORIGINAL_NUMBAGG: dict[str, Any] = {}
 _ORIGINAL_FUNCS: dict[str, Any] = {}
 _ORIGINAL_GROUPED: dict[str, Any] = {}
 _ORIGINAL_MODULES: dict[str, dict[str, Any]] = {}
+_ORIGINAL_XARRAY: dict[str, Any] = {}
+_ORIGINAL_XARRAY_ROLLING: dict[str, tuple[Any, Any]] = {}
 _SHIM_MODULES: set[str] = set()
 _ORIGINAL_LISTS: dict[str, list[Any]] = {}
 _COMPARISONS_BY_NAME: dict[str, Any] = {}
@@ -104,6 +107,22 @@ _MODULE_NAMES = {
         "move_exp_nancorrmatrix",
         "move_exp_nancovmatrix",
     ),
+}
+
+# xarray normally imports these operations from ``numbagg`` at call time, so
+# replacing the numbagg module is sufficient.  Its nanops implementation of
+# nansum is the exception: it uses ``sum_where`` directly and never looks up
+# numbagg.nansum.
+_XARRAY_NANOPS_DIRECT = ("nansum",)
+_XARRAY_ROLLING_FUNCS = {
+    "argmax": "move_argmax",
+    "argmin": "move_argmin",
+    "max": "move_max",
+    "min": "move_min",
+    "prod": "move_prod",
+    "sum": "move_sum",
+    "std": "move_std",
+    "var": "move_var",
 }
 
 
@@ -174,6 +193,48 @@ def register(target: Any = None) -> None:
             if hasattr(mojagg, name) and hasattr(grouped_mod, name):
                 _ORIGINAL_GROUPED[name] = getattr(grouped_mod, name)
                 setattr(grouped_mod, name, getattr(mojagg, name))
+    except Exception:
+        pass
+
+    # Patch xarray paths that bypass its normal dynamic numbagg lookup.  The
+    # wrapper deliberately resolves the target attribute on every call so a
+    # downstream caller can still patch numbagg.nansum after registration.
+    try:
+        import xarray.computation.nanops as xarray_nanops
+
+        for name in _XARRAY_NANOPS_DIRECT:
+            if not hasattr(xarray_nanops, name) or not hasattr(target, name):
+                continue
+            original = getattr(xarray_nanops, name)
+            _ORIGINAL_XARRAY[name] = original
+
+            @wraps(original)
+            def registered_nanop(*args: Any, _name=name, **kwargs: Any) -> Any:
+                return getattr(target, _name)(*args, **kwargs)
+
+            setattr(xarray_nanops, name, registered_nanop)
+    except Exception:
+        pass
+
+    # Xarray creates rolling methods with the numbagg function captured in a
+    # closure at module import time. Update those cached references as well.
+    try:
+        import xarray.computation.rolling as xarray_rolling
+
+        for method_name, numbagg_name in _XARRAY_ROLLING_FUNCS.items():
+            if not hasattr(mojagg, numbagg_name):
+                continue
+            method = getattr(xarray_rolling.Rolling, method_name, None)
+            if method is None or method.__closure__ is None:
+                continue
+            for cell in method.__closure__:
+                if getattr(cell.cell_contents, "__name__", None) == numbagg_name:
+                    _ORIGINAL_XARRAY_ROLLING[method_name] = (
+                        cell,
+                        cell.cell_contents,
+                    )
+                    cell.cell_contents = getattr(mojagg, numbagg_name)
+                    break
     except Exception:
         pass
 
@@ -298,6 +359,14 @@ def unregister() -> None:
         for name, fn in _ORIGINAL_GROUPED.items():
             setattr(grouped_mod, name, fn)
 
+    if "xarray.computation.nanops" in sys.modules:
+        xarray_nanops = sys.modules["xarray.computation.nanops"]
+        for name, fn in _ORIGINAL_XARRAY.items():
+            setattr(xarray_nanops, name, fn)
+
+    for cell, fn in _ORIGINAL_XARRAY_ROLLING.values():
+        cell.cell_contents = fn
+
     for module_name, originals in _ORIGINAL_MODULES.items():
         if module_name in sys.modules:
             module = sys.modules[module_name]
@@ -324,6 +393,8 @@ def unregister() -> None:
     _ORIGINAL_FUNCS.clear()
     _ORIGINAL_GROUPED.clear()
     _ORIGINAL_MODULES.clear()
+    _ORIGINAL_XARRAY.clear()
+    _ORIGINAL_XARRAY_ROLLING.clear()
     _SHIM_MODULES.clear()
     _ORIGINAL_LISTS.clear()
     _IS_REGISTERED = False
