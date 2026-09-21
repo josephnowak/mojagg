@@ -1,7 +1,7 @@
 """Test registration and monkeypatching of numbagg."""
 
 import importlib
-from unittest.mock import patch
+from unittest.mock import Mock, patch
 
 import numbagg
 import numpy as np
@@ -108,6 +108,35 @@ def test_xarray_rolling_uses_registered_mojagg_functions(rolling_method, numbagg
         if cell.cell_contents is getattr(mojagg, numbagg_name)
     )
     assert cell.cell_contents is getattr(mojagg, numbagg_name)
+
+
+@pytest.mark.parametrize(
+    ("rolling_method", "numbagg_name"),
+    [("sum", "move_sum"), ("std", "move_std"), ("var", "move_var")],
+)
+def test_xarray_rolling_calls_registered_mojagg_functions(rolling_method, numbagg_name):
+    xarray = pytest.importorskip("xarray")
+
+    mojagg.unregister()
+    mojagg.register()
+    method = getattr(importlib.import_module("xarray.computation.rolling").Rolling, rolling_method)
+    cell = next(
+        cell
+        for cell in method.__closure__ or ()
+        if cell.cell_contents is getattr(mojagg, numbagg_name)
+    )
+    original = cell.cell_contents
+    fn = Mock(wraps=original)
+    cell.cell_contents = fn
+    try:
+        values = xarray.DataArray([1.0, np.nan, 3.0], dims="x")
+        getattr(values.rolling(x=2), rolling_method)()
+    finally:
+        cell.cell_contents = original
+
+    fn.assert_called_once()
+    mojagg.unregister()
+    mojagg.register()
 
 
 @pytest.mark.parametrize(

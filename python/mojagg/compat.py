@@ -223,7 +223,7 @@ def register(target: Any = None) -> None:
             if method is None or method.__closure__ is None:
                 continue
             for cell in method.__closure__:
-                if getattr(cell.cell_contents, "__name__", None) == numbagg_name:
+                if cell.cell_contents is getattr(target, numbagg_name, None):
                     _ORIGINAL_XARRAY_ROLLING[method_name] = (
                         cell,
                         cell.cell_contents,
