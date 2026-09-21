@@ -35,15 +35,32 @@ struct GroupNanAnyAll[
         value: Scalar[Self.value_t],
     ):
         var label = Int(label_value)
-        if label < 0:
-            return
+        var truth: Bool
         comptime if Self.value_t.is_floating_point():
-            if isnan(value):
-                return
+            var value_block = SIMD[Self.value_t, 1](value)
+            var zero_block = SIMD[Self.value_t, 1](0)
+            var is_nan = isnan(value_block)[0]
+            var is_nonzero = value_block != zero_block
+            truth = (
+                is_nan
+                or is_nonzero if Self.is_all else not is_nan
+                and is_nonzero
+            )
+        else:
+            truth = value != Scalar[Self.value_t](0)
         # `all` clears the group on a falsy lane, `any` sets it on a truthy one.
-        comptime resolved = Scalar[Self.value_t](0 if Self.is_all else 1)
-        if Bool(value) != Self.is_all:
-            destination[unsafe_offset=label] = resolved
+        var truth_block = SIMD[DType.bool, 1](truth)
+        var destination_block = SIMD[Self.value_t, 1](
+            destination[unsafe_offset=label]
+        )
+        comptime if Self.is_all:
+            destination[unsafe_offset=label] = truth_block.select(
+                destination_block, SIMD[Self.value_t, 1](0)
+            )[0]
+        else:
+            destination[unsafe_offset=label] = truth_block.select(
+                SIMD[Self.value_t, 1](1), destination_block
+            )[0]
 
     @always_inline
     def __call__(mut self, tensors: Self.Signature):
@@ -71,9 +88,12 @@ struct GroupNanAnyAll[
                 label_ptr, i, evl, Scalar[Self.label_t](-1)
             )
             comptime for lane in range(width):
+                var label = label_block[lane]
+                if label < 0:
+                    continue
                 Self._update_lane(
                     destination_ptr,
-                    label_block[lane],
+                    label,
                     value_block[lane],
                 )
 

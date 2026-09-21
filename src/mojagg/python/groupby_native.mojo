@@ -204,6 +204,7 @@ def _apply_group_one[
     value_dtype: DType,
     label_dtype: DType,
     Op: GroupKernel,
+    output_dtype: DType = value_dtype,
 ](
     values: PythonObject,
     labels: PythonObject,
@@ -235,7 +236,7 @@ def _apply_group_one[
     var signature = Tuple(
         values_tensor,
         labels_tensor,
-        GUTensor[value_dtype, True, CoreSpec[Dim[1]]].empty(),
+        GUTensor[output_dtype, True, CoreSpec[Dim[1]]].empty(),
     )
     return _execute_group[Op](
         values,
@@ -612,7 +613,7 @@ def group_nanfirst_binding[
         options,
         GroupNanFirst[value_dtype, label_dtype](),
         "group_nanfirst",
-        [GROUP_INIT_NAN_OR_ZERO, GROUP_INIT_ZERO],
+        [GROUP_INIT_NAN_OR_ZERO],
     )
 
 

@@ -52,13 +52,22 @@ struct GroupNanVarStd[
         value: Scalar[Self.value_t],
     ):
         var label = Int(label_value)
-        if label < 0:
-            return
-        if isnan(value):
-            return
-        sums[unsafe_offset=label] += value
-        sums_of_squares[unsafe_offset=label] += value * value
-        counts[unsafe_offset=label] += 1
+        var clean_value: Scalar[Self.value_t]
+        var count: Scalar[Self.label_t]
+        comptime if Self.value_t.is_floating_point():
+            var value_block = SIMD[Self.value_t, 1](value)
+            clean_value = isnan(value_block).select(
+                SIMD[Self.value_t, 1](0), value_block
+            )[0]
+            count = isnan(value_block).select(
+                SIMD[Self.label_t, 1](0), SIMD[Self.label_t, 1](1)
+            )[0]
+        else:
+            clean_value = value
+            count = Scalar[Self.label_t](1)
+        sums[unsafe_offset=label] += clean_value
+        sums_of_squares[unsafe_offset=label] += clean_value * clean_value
+        counts[unsafe_offset=label] += count
 
     @always_inline
     def __call__(mut self, tensors: Self.Signature):
@@ -95,11 +104,14 @@ struct GroupNanVarStd[
                 label_ptr, i, evl, Scalar[Self.label_t](-1)
             )
             comptime for lane in range(width):
+                var label = label_block[lane]
+                if label < 0:
+                    continue
                 Self._add_lane(
                     destination_ptr,
                     squares_ptr,
                     count_ptr,
-                    label_block[lane],
+                    label,
                     value_block[lane],
                 )
 
@@ -147,4 +159,4 @@ struct GroupNanVarStd[
                         ] = variance_block[lane]
 
         comptime width_finalize = simd_width_of[Self.value_t]()
-        vectorize[width_finalize, unroll_factor=8](len(destination), finalize)
+        vectorize[width_finalize, unroll_factor=1](len(destination), finalize)

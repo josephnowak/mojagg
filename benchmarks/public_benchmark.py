@@ -396,7 +396,7 @@ class Public(BenchmarkSuite):
                 ReductionTest("2d_nan_f64", (32, 16_384), axis=1, nan_fraction=0.10, seed=102),
                 ReductionTest(
                     "3d_multi_axis_f64",
-                    (8, 64, 512),
+                    (8, 125, 3_000),
                     axis=(1, 2),
                     nan_fraction=0.25,
                     nan_pattern="blocks",
@@ -601,7 +601,7 @@ class Public(BenchmarkSuite):
                 ),
                 FillTest(
                     "3d_multi_axis_blocks",
-                    (8, 32, 256),
+                    (8, 125, 3_000),
                     axis=(1, 2),
                     limit=64,
                     nan_fraction=0.25,

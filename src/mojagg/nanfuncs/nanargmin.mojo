@@ -35,12 +35,13 @@ def nan_arg_extreme_contiguous[
         return -1
 
     comptime width = simd_width_of[DType.int64]()
-    var identity = pos_inf_or_max[dtype]() if is_min else neg_inf_or_min[
-        dtype
-    ]()
-    var pad_val = nan_or_zero[
-        dtype
-    ]() if dtype.is_floating_point() else identity
+    comptime identity = (
+        pos_inf_or_max[dtype]() if is_min else neg_inf_or_min[dtype]()
+    )
+
+    comptime pad_val = (
+        nan_or_zero[dtype]() if dtype.is_floating_point() else identity
+    )
 
     var global_best = SIMD[dtype, width](identity)
     var global_best_base_i = SIMD[DType.int64, width](-1)
@@ -48,9 +49,7 @@ def nan_arg_extreme_contiguous[
 
     def step[
         vector_width: Int
-    ](i: Int, evl: Int) {
-        imm pointer, mut global_best, mut global_best_base_i, imm pad_val
-    }:
+    ](i: Int, evl: Int) {imm pointer, mut global_best, mut global_best_base_i}:
         var block = load_block_or_identity[dtype, width](
             pointer, i, evl, pad_val
         )

@@ -37,7 +37,7 @@ def _move_sum_sequential[
     observes the preceding output's state.
     """
 
-    comptime width = simd_width_of[dtype]()
+    comptime width = 1
     var n = len(values)
     var input_offset = 0
     var sum = Scalar[dtype](0)

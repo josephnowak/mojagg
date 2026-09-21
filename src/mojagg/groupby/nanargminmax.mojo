@@ -1,11 +1,12 @@
 """Grouped NaN-aware argmin and argmax kernels."""
 
-from std.algorithm import vectorize
 from std.collections import Span
-from std.math import isnan
-from std.sys.info import simd_width_of
 
-from mojagg.core.numeric import load_block_or_identity, nan_or_zero
+from mojagg.core.numeric import (
+    load_block_or_identity,
+    neg_inf_or_min,
+    pos_inf_or_max,
+)
 from mojagg.core.preallocated import Preallocated
 from mojagg.drivers.guvectorize import (
     CoreSpec,
@@ -37,45 +38,37 @@ struct GroupNanArgMinMax[
         self.preallocated = Preallocated[Self.value_t]()
 
     @always_inline
+    @staticmethod
+    def _identity() -> Scalar[Self.value_t]:
+        comptime if Self.value_t == DType.bool:
+            return Scalar[Self.value_t](False if Self.is_max else True)
+        else:
+            return neg_inf_or_min[
+                Self.value_t
+            ]() if Self.is_max else pos_inf_or_max[Self.value_t]()
+
+    @always_inline
     def get_best_ptr(
         mut self,
         destination: Span[mut=True, Scalar[Self.value_t], _],
     ) -> Pointer[mut=True, Scalar[Self.value_t], MutUntrackedOrigin]:
-        var identity: Scalar[Self.value_t]
-        comptime if Self.value_t.is_floating_point():
-            identity = nan_or_zero[Self.value_t]()
-        else:
-            identity = Scalar[Self.value_t](-1)
-        return self.preallocated.get_ptr(len(destination), identity)
+        return self.preallocated.get_ptr(len(destination), Self._identity())
 
     @always_inline
     @staticmethod
-    def _is_valid(value: Scalar[Self.value_t]) -> Bool:
-        """Integer lanes are always valid; float lanes skip NaN."""
-        comptime if Self.value_t.is_floating_point():
-            return not isnan(value)
-        else:
-            return True
-
-    @always_inline
-    @staticmethod
-    def _is_unset(index_slot: Scalar[Self.value_t]) -> Bool:
-        """An untouched index slot holds NaN for floats and -1 for ints."""
-        comptime if Self.value_t.is_floating_point():
-            return isnan(index_slot)
-        else:
-            return Bool(index_slot < Scalar[Self.value_t](0))
-
-    @always_inline
-    @staticmethod
-    def _improves(
+    def _should_update(
         value: Scalar[Self.value_t], best_value: Scalar[Self.value_t]
     ) -> Bool:
-        """Whether `value` beats the incumbent for this kernel's direction."""
-        comptime if Self.is_max:
-            return Bool(value > best_value)
+        """Use reverse traversal to retain the first index on ties."""
+        comptime if Self.value_t == DType.bool:
+            if Self.is_max:
+                return Bool(Int(value) >= Int(best_value))
+            else:
+                return Bool(Int(value) <= Int(best_value))
+        elif Self.is_max:
+            return Bool(value >= best_value)
         else:
-            return Bool(value < best_value)
+            return Bool(value <= best_value)
 
     @always_inline
     @staticmethod
@@ -87,17 +80,12 @@ struct GroupNanArgMinMax[
         flat_index: Int,
     ):
         var label = Int(label_value)
-        if label < 0 or not Self._is_valid(value):
-            return
-
-        var should_update = Self._is_unset(
-            destination[unsafe_offset=label]
-        ) or Self._improves(value, best_values[unsafe_offset=label])
-        if not should_update:
-            return
-
-        destination[unsafe_offset=label] = Scalar[Self.value_t](flat_index)
-        best_values[unsafe_offset=label] = value
+        var should_update = Self._should_update(
+            value, best_values[unsafe_offset=label]
+        )
+        if should_update:
+            destination[unsafe_offset=label] = Scalar[Self.value_t](flat_index)
+            best_values[unsafe_offset=label] = value
 
     @always_inline
     def __call__(mut self, tensors: Self.Signature):
@@ -126,13 +114,24 @@ struct GroupNanArgMinMax[
             var label_block = load_block_or_identity[Self.label_t, width](
                 label_ptr, i, evl, Scalar[Self.label_t](-1)
             )
-            comptime for lane in range(width):
+            comptime for lane in range(width - 1, -1, -1):
+                var label = label_block[lane]
+                if label < 0:
+                    continue
                 Self._update_lane(
                     destination_ptr,
                     best_ptr,
-                    label_block[lane],
+                    label,
                     value_block[lane],
                     i + lane,
                 )
 
-        vectorize[width, unroll_factor=8](len(values), step)
+        var n = len(values)
+        var tail = n % width
+        var tail_start = n - tail
+
+        if tail > 0:
+            step[width](tail_start, tail)
+
+        for i in range(tail_start - width, -1, -width):
+            step[width](i, width)

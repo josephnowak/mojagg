@@ -150,7 +150,7 @@ def _accumulate_pair_simd[
                             sum_yy[lane] += dy * dy
                             sum_xy[lane] += dx * dy
 
-    vectorize[width](n_obs, step)
+    vectorize[width, unroll_factor=1](n_obs, step)
 
     var acc = PairwiseAcc[dtype]()
     acc.count = count.reduce_add()
@@ -215,7 +215,7 @@ def _accumulate_cov_diag_simd[
                         sum_x[lane] += dx
                         sum_xx[lane] += dx * dx
 
-    vectorize[width](n_obs, step)
+    vectorize[width, unroll_factor=1](n_obs, step)
 
     var acc = PairwiseAcc[dtype]()
     acc.count = count.reduce_add()
@@ -290,7 +290,7 @@ def _accumulate_cov_offdiag_simd[
                         sum_y[lane] += dy
                         sum_xy[lane] += dx * dy
 
-    vectorize[width](n_obs, step)
+    vectorize[width, unroll_factor=1](n_obs, step)
 
     var acc = PairwiseAcc[dtype]()
     acc.count = count.reduce_add()

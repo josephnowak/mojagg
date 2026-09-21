@@ -29,7 +29,7 @@ def _move_corr_sequential[
 ):
     """Compute pairwise correlation with SIMD block deltas."""
 
-    comptime width = simd_width_of[dtype]()
+    comptime width = 1
     var n = len(a_values)
     var input_offset = 0
     var a_sum = Scalar[dtype](0)

@@ -27,7 +27,7 @@ def _move_mean_sequential[
 ):
     """Compute one moving-mean core with SIMD block deltas."""
 
-    comptime width = simd_width_of[dtype]()
+    comptime width = 1
     var n = len(values)
     var input_offset = 0
     var total = Scalar[dtype](0)

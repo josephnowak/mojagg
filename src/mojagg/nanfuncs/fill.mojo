@@ -117,7 +117,7 @@ struct FillKernel[
             )
             return
 
-        comptime width = simd_width_of[Self.dtype]() * 4
+        comptime width = 4
         var current = nan_or_zero[Self.dtype]()
         var allowed = self.limit if self.limit >= 0 else n
         var remaining = allowed
@@ -133,14 +133,23 @@ struct FillKernel[
         while Self._chunk_valid(offset, n, width):
             var block = src_ptr.unsafe_load[width=width](offset)
 
-            comptime for i in range(width):
-                comptime lane = (width - 1 - i) if Self.backward else i
-                block[lane] = self._apply_step(
-                    block[lane],
-                    current,
-                    remaining,
-                    allowed,
-                )
+            comptime if Self.backward:
+                comptime for i in range(width):
+                    comptime lane = width - 1 - i
+                    block[lane] = self._apply_step(
+                        block[lane],
+                        current,
+                        remaining,
+                        allowed,
+                    )
+            else:
+                comptime for i in range(width):
+                    block[i] = self._apply_step(
+                        block[i],
+                        current,
+                        remaining,
+                        allowed,
+                    )
             dest_ptr.unsafe_store[width=width](offset, block)
 
             offset += chunk_step
