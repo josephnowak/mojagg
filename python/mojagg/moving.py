@@ -81,6 +81,8 @@ def _prepare_move_array(a: Any, op: str) -> np.ndarray:
         a_arr = a_arr.byteswap().view(a_arr.dtype.newbyteorder("="))
     if a_arr.dtype == np.dtype(np.float16):
         a_arr = a_arr.astype(np.float32)
+    if np.issubdtype(a_arr.dtype, np.integer) or a_arr.dtype == np.dtype(np.bool_):
+        a_arr = a_arr.astype(np.float64)
     if a_arr.dtype not in _MOVE_SUM_KERNELS:
         raise TypeError(
             f"{op} does not support dtype {a_arr.dtype}; supported: {_SUPPORTED_MOVE_DTYPES}"
@@ -110,6 +112,10 @@ def _move_unary(
     _validate_window(a_arr, window_int, normalized_axis)
 
     a_arr = _prepare_move_array(a_arr, op)
+    if op == "move_mean" and window_int == 1:
+        if min_count_int <= 1:
+            return a_arr.copy()
+        return np.full_like(a_arr, np.nan, dtype=a_arr.dtype)
     moved = np.moveaxis(a_arr, normalized_axis, -1)
     core_axis = moved.ndim - 1
     out_moved = kernels[a_arr.dtype](

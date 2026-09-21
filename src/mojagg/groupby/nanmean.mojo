@@ -46,11 +46,10 @@ struct GroupNanMean[
         var label = Int(label_value)
         comptime if Self.value_t.is_floating_point():
             var value_block = SIMD[Self.value_t, 1](value)
-            var zero_block = SIMD[Self.value_t, 1](0)
-            var clean_value = isnan(value_block).select(
-                zero_block, value_block
-            )[0]
-            var valid_count = isnan(value_block).select(
+            comptime zero_block = SIMD[Self.value_t, 1](0)
+            var mask = isnan(value_block)
+            var clean_value = mask.select(zero_block, value_block)[0]
+            var valid_count = mask.select(
                 SIMD[Self.label_t, 1](0), SIMD[Self.label_t, 1](1)
             )[0]
             destination[unsafe_offset=label] += clean_value

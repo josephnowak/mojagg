@@ -22,25 +22,28 @@ struct GroupNanVarStd[
 ](GroupKernel, ImplicitlyCopyable):
     """Accumulate sum, sum of squares, and count for each group."""
 
-    var ddof: Int
-    var counts: Preallocated[Self.label_t]
-    var sums_of_squares: Preallocated[Self.value_t]
-
-    def __init__(out self, ddof: Int):
-        self.ddof = ddof
-        self.counts = Preallocated[Self.label_t]()
-        self.sums_of_squares = Preallocated[Self.value_t]()
-
-    def __init__(out self, *, copy: Self):
-        self.ddof = copy.ddof
-        self.counts = Preallocated[Self.label_t]()
-        self.sums_of_squares = Preallocated[Self.value_t]()
-
     comptime Signature = Tuple[
         GUTensor[Self.value_t, False, CoreSpec[Dim[0]]],
         GUTensor[Self.label_t, False, CoreSpec[Dim[0]]],
         GUTensor[Self.value_t, True, CoreSpec[Dim[1]]],
     ]
+
+    var ddof: Int
+    var counts: Preallocated[Self.label_t]
+    var sums: Preallocated[Self.value_t]
+    var sums_of_squares: Preallocated[Self.value_t]
+
+    def __init__(out self, ddof: Int):
+        self.ddof = ddof
+        self.counts = Preallocated[Self.label_t]()
+        self.sums = Preallocated[Self.value_t]()
+        self.sums_of_squares = Preallocated[Self.value_t]()
+
+    def __init__(out self, *, copy: Self):
+        self.ddof = copy.ddof
+        self.counts = Preallocated[Self.label_t]()
+        self.sums = Preallocated[Self.value_t]()
+        self.sums_of_squares = Preallocated[Self.value_t]()
 
     @always_inline
     @staticmethod
@@ -56,10 +59,9 @@ struct GroupNanVarStd[
         var count: Scalar[Self.label_t]
         comptime if Self.value_t.is_floating_point():
             var value_block = SIMD[Self.value_t, 1](value)
-            clean_value = isnan(value_block).select(
-                SIMD[Self.value_t, 1](0), value_block
-            )[0]
-            count = isnan(value_block).select(
+            var mask = isnan(value_block)
+            clean_value = mask.select(SIMD[Self.value_t, 1](0), value_block)[0]
+            count = mask.select(
                 SIMD[Self.label_t, 1](0), SIMD[Self.label_t, 1](1)
             )[0]
         else:
@@ -78,6 +80,9 @@ struct GroupNanVarStd[
         var count_ptr = self.counts.get_ptr(
             len(destination), Scalar[Self.label_t](0)
         )
+        var sums_ptr = self.sums.get_ptr(
+            len(destination), Scalar[Self.value_t](0)
+        )
         var squares_ptr = self.sums_of_squares.get_ptr(
             len(destination), Scalar[Self.value_t](0)
         )
@@ -86,14 +91,15 @@ struct GroupNanVarStd[
         var value_ptr = values.unsafe_ptr()
         var label_ptr = labels.unsafe_ptr()
         var destination_ptr = destination.unsafe_ptr()
-        var ddof = Scalar[Self.label_t](self.ddof)
+        var ddof = self.ddof
+        comptime width_finalize = simd_width_of[Self.value_t]()
 
         def step[
             vector_width: Int
         ](i: Int, evl: Int) {
             imm value_ptr,
             imm label_ptr,
-            imm destination_ptr,
+            imm sums_ptr,
             imm squares_ptr,
             imm count_ptr,
         }:
@@ -108,7 +114,7 @@ struct GroupNanVarStd[
                 if label < 0:
                     continue
                 Self._add_lane(
-                    destination_ptr,
+                    sums_ptr,
                     squares_ptr,
                     count_ptr,
                     label,
@@ -123,40 +129,37 @@ struct GroupNanVarStd[
             i: Int,
             evl: Int,
         ) {
-            imm destination_ptr, imm squares_ptr, imm count_ptr, imm ddof
+            imm destination_ptr,
+            imm sums_ptr,
+            imm squares_ptr,
+            imm count_ptr,
+            imm ddof,
         }:
-            var sum_block = load_block_or_identity[Self.value_t, width](
-                destination_ptr, i, evl, Scalar[Self.value_t](0)
-            )
-            var squares_block = load_block_or_identity[Self.value_t, width](
-                squares_ptr, i, evl, Scalar[Self.value_t](0)
-            )
-            var count_block = load_block_or_identity[Self.label_t, width](
-                count_ptr, i, evl, Scalar[Self.label_t](0)
-            )
-            var denominator_block = count_block - SIMD[Self.label_t, width](
-                ddof
-            )
-            var count_values = count_block.cast[Self.value_t]()
-            var denominator_values = denominator_block.cast[Self.value_t]()
-            var variance_block = (
-                squares_block - sum_block * sum_block / count_values
-            ) / denominator_values
-            var invalid = isnan(sqrt(denominator_values) / denominator_values)
-            var nan_block = SIMD[Self.value_t, width](
-                nan_or_zero[Self.value_t]()
-            )
-            comptime if Self.is_std:
-                variance_block = sqrt(variance_block)
-            variance_block = invalid.select(nan_block, variance_block)
-            if evl == width:
-                destination_ptr.unsafe_store[width=width](i, variance_block)
-            else:
-                comptime for lane in range(width):
-                    if lane < evl:
-                        destination_ptr[
-                            unsafe_offset=i + lane
-                        ] = variance_block[lane]
+            var sum_block = load_block_or_identity[
+                Self.value_t, width_finalize
+            ](sums_ptr, i, evl, Scalar[Self.value_t](0))
+            var squares_block = load_block_or_identity[
+                Self.value_t, width_finalize
+            ](squares_ptr, i, evl, Scalar[Self.value_t](0))
+            var count_block = load_block_or_identity[
+                Self.label_t, width_finalize
+            ](count_ptr, i, evl, Scalar[Self.label_t](0))
+            comptime for lane in range(width_finalize):
+                if lane < evl:
+                    var count = Int(count_block[lane])
+                    if count <= ddof:
+                        destination_ptr[unsafe_offset=i + lane] = nan_or_zero[
+                            Self.value_t
+                        ]()
+                    else:
+                        var count_value = Scalar[Self.value_t](count)
+                        var denominator = Scalar[Self.value_t](count - ddof)
+                        var variance = (
+                            squares_block[lane]
+                            - sum_block[lane] * sum_block[lane] / count_value
+                        ) / denominator
+                        comptime if Self.is_std:
+                            variance = sqrt(variance)
+                        destination_ptr[unsafe_offset=i + lane] = variance
 
-        comptime width_finalize = simd_width_of[Self.value_t]()
         vectorize[width_finalize, unroll_factor=1](len(destination), finalize)

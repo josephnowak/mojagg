@@ -1,6 +1,7 @@
 """Grouped NaN-aware argmin and argmax kernels."""
 
 from std.collections import Span
+from std.math import isnan
 
 from mojagg.core.numeric import (
     load_block_or_identity,
@@ -56,22 +57,6 @@ struct GroupNanArgMinMax[
 
     @always_inline
     @staticmethod
-    def _should_update(
-        value: Scalar[Self.value_t], best_value: Scalar[Self.value_t]
-    ) -> Bool:
-        """Use reverse traversal to retain the first index on ties."""
-        comptime if Self.value_t == DType.bool:
-            if Self.is_max:
-                return Bool(Int(value) >= Int(best_value))
-            else:
-                return Bool(Int(value) <= Int(best_value))
-        elif Self.is_max:
-            return Bool(value >= best_value)
-        else:
-            return Bool(value <= best_value)
-
-    @always_inline
-    @staticmethod
     def _update_lane(
         destination: Pointer[mut=True, Scalar[Self.value_t], _],
         best_values: Pointer[mut=True, Scalar[Self.value_t], _],
@@ -80,12 +65,21 @@ struct GroupNanArgMinMax[
         flat_index: Int,
     ):
         var label = Int(label_value)
-        var should_update = Self._should_update(
-            value, best_values[unsafe_offset=label]
-        )
-        if should_update:
-            destination[unsafe_offset=label] = Scalar[Self.value_t](flat_index)
-            best_values[unsafe_offset=label] = value
+        var current = best_values[unsafe_offset=label]
+        var pos = destination[unsafe_offset=label]
+
+        var should_update: SIMD[DType.bool, 1]
+        comptime if Self.is_max:
+            should_update = value >= current
+        else:
+            should_update = value <= current
+
+        destination[unsafe_offset=label] = should_update.select(
+            Scalar[Self.value_t](flat_index), pos
+        )[0]
+        best_values[unsafe_offset=label] = should_update.select(value, current)[
+            0
+        ]
 
     @always_inline
     def __call__(mut self, tensors: Self.Signature):

@@ -4,7 +4,12 @@ from std.algorithm import vectorize
 from std.math import isnan
 from std.sys.info import simd_width_of
 
-from mojagg.core.numeric import load_block_or_identity
+from mojagg.core.numeric import (
+    load_block_or_identity,
+    neg_inf_or_min,
+    pos_inf_or_max,
+    nan_or_zero,
+)
 from mojagg.drivers.guvectorize import (
     CoreSpec,
     Dim,
@@ -35,22 +40,15 @@ struct GroupNanMinMax[
         value: Scalar[Self.value_t],
     ):
         var label = Int(label_value)
-        if label < 0:
-            return
-        comptime if Self.value_t.is_floating_point():
-            if isnan(value):
-                return
-        var should_update = False
-        comptime if Self.value_t.is_floating_point():
-            if isnan(destination[unsafe_offset=label]):
-                should_update = True
-        if not should_update:
-            comptime if Self.is_max:
-                should_update = value > destination[unsafe_offset=label]
-            else:
-                should_update = value < destination[unsafe_offset=label]
-        if should_update:
-            destination[unsafe_offset=label] = value
+        var current = destination[unsafe_offset=label]
+        var should_update: SIMD[DType.bool, 1]
+        comptime if Self.is_max:
+            should_update = value >= current
+        else:
+            should_update = value <= current
+
+        should_update |= isnan(current)
+        destination[unsafe_offset=label] = should_update.select(value, current)
 
     @always_inline
     def __call__(mut self, tensors: Self.Signature):
@@ -63,6 +61,14 @@ struct GroupNanMinMax[
         var value_ptr = values.unsafe_ptr()
         var label_ptr = labels.unsafe_ptr()
         var destination_ptr = destination.unsafe_ptr()
+        comptime identity = (
+            neg_inf_or_min[Self.value_t]() if Self.is_max else pos_inf_or_max[
+                Self.value_t
+            ]()
+        )
+        comptime identity_block = SIMD[Self.value_t, width](identity)
+        comptime missing_label = Scalar[Self.label_t](-1)
+        comptime empty_value = nan_or_zero[Self.value_t]()
 
         def step[
             vector_width: Int
@@ -72,15 +78,18 @@ struct GroupNanMinMax[
             imm destination_ptr,
         }:
             var value_block = load_block_or_identity[Self.value_t, width](
-                value_ptr, i, evl, Scalar[Self.value_t](0)
+                value_ptr, i, evl, empty_value
             )
             var label_block = load_block_or_identity[Self.label_t, width](
-                label_ptr, i, evl, Scalar[Self.label_t](-1)
+                label_ptr, i, evl, missing_label
             )
             comptime for lane in range(width):
+                var label = label_block[lane]
+                if label < 0:
+                    continue
                 Self._update_lane(
                     destination_ptr,
-                    label_block[lane],
+                    label,
                     value_block[lane],
                 )
 
