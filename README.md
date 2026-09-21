@@ -1,236 +1,342 @@
-# mojagg
+# mojagg: numbagg-compatible numerical kernels in Mojo
 
-## Development workflow
+NaN-aware reductions, grouped operations, rolling windows, and matrix statistics with a Python API and compiled Mojo kernels.
 
-Development on Windows always runs through Ubuntu WSL. Use the single wrapper
-for setup, source discovery, compilation, tests, and linting:
+[![License](https://img.shields.io/badge/license-BSD--3--Clause-blue.svg)](LICENSE)
+[![Python](https://img.shields.io/badge/python-3.10%2B-blue.svg)](https://www.python.org/)
+[![NumPy](https://img.shields.io/badge/numpy-2.0%2B-blue.svg)](https://numpy.org/)
 
-```powershell
-powershell.exe -NoProfile -ExecutionPolicy Bypass -File scripts/mojagg.ps1 install
-powershell.exe -NoProfile -ExecutionPolicy Bypass -File scripts/mojagg.ps1 doctor
-powershell.exe -NoProfile -ExecutionPolicy Bypass -File scripts/mojagg.ps1 test
-```
+---
 
-The wrapper scopes normal source searches to `python/`, `src/`, and `tests/`.
-See `.agents/skills/mojagg-workflow/SKILL.md` for the AI workflow.
+## At a glance
 
-**NaN-aware aggregations, grouped reductions, and rolling windows — numbagg's API, Mojo's speed.**
+`mojagg` is a high-performance numerical library that provides a drop-in, compiled alternative to [numbagg](https://github.com/numbagg/numbagg). It implements fast, NaN-aware reductions, grouped aggregations, rolling windows, and matrix statistics written in [Mojo](https://www.modular.com/mojo) and compiled ahead-of-time (AOT) into a native extension.
 
-```python
-import mojagg
+- **100% numbagg compatibility:** Identical function names, keyword signatures, and NaN/NaT semantics validated against numbagg's test suite.
+- **Zero JIT compilation latency:** Kernels are pre-compiled into native machine code. Unlike Numba, there is no first-call compilation delay.
+- **Python-first distribution:** Distributed as standard binary wheels (`pip install mojagg`). End users do not need Mojo or a local compiler toolchain installed.
+- **Drop-in registration:** Seamlessly integrates with [xarray](https://github.com/pydata/xarray) and existing numbagg pipelines via `mojagg.register()` or `mojagg.patch()`.
 
-mojagg.nansum(a, axis=1)
-mojagg.group_nanmean(values, labels, axis=0)
-mojagg.move_mean(a, window=30, min_count=5)
-```
-
-If you know [numbagg](https://github.com/numbagg/numbagg), you already know mojagg: same functions, same signatures, same NaN semantics — reimplemented from scratch in [Mojo](https://www.modular.com/mojo) instead of numba, and pushed further.
+---
 
 ## Why mojagg?
 
-- **Drop-in**: 100% API- and semantics-compatible with numbagg. Change your import, keep your code.
-- **Faster**: explicit SIMD (not compiler-hoped-for), cache-line-padded parallel reductions, branch-free NaN masking, and software-prefetched group-by scatter. No JIT warmup — kernels are AOT-compiled into the wheel.
-- **Tunable**: every dispatch decision (parallel thresholds, worker counts, backend) is configurable per-call, globally, or by env var.
-- **Honest**: reproducible comparisons against numbagg and NumPy, with development/WSL timings clearly separated from native-hardware calibration.
+This project was born out of a desire to learn Mojo through a real-world, practical codebase. In my experience, the fastest way to truly understand a new programming language is to implement a production-relevant system with it.
 
-### GUFunc driver
+I chose to replicate `numbagg` because it is an essential library in the scientific Python ecosystem (powering much of Xarray) and implements fundamental algorithms with clean Python/Numba syntax while competing with compiled code. That makes numbagg exceptionally maintainable—one of the most important qualities for any numerical library.
 
-Every operation declares one fixed-arity native tuple of typed `GUTensor`
-descriptors. Dtypes, read/write capabilities, and core dimensions are
-compile-time specializations; there is no boxed runtime dtype dispatch. The
-binding resolves symbolic core sizes, the driver broadcasts only outer
-dimensions, and `GUFuncKernel.__call__` receives one prepared core per outer
-position. Non-contiguous read cores use worker-local scratch, while writable
-cores are validated for direct writes. `DispatchPolicy` parallelizes the outer
-slice domain only after both the outer-group and input-core thresholds pass.
+Beyond learning the syntax, I wanted to test the performance of Mojo with algorithms that do not require extreme low-level programming. I wanted to see if Mojo could be that sweet spot between Python-level readability and bare-metal performance, and whether it could beat Numba under those conditions.
 
-See the full [guvectorize driver reference](docs/guvectorize.md) for the
-Numba gufunc model, `GUTensor` ownership, core-axis flattening, output layout,
-broadcasting examples, native binding flow, scratch behavior, and contribution
-rules.
+I did not originally plan to replicate the entire library—I initially set out to implement only a handful of algorithms. But after discovering that Mojo could match and in several functions substantially outperform Numba, I decided to complete the implementation, achieve full compatibility, and make it available.
 
-Run `powershell.exe -NoProfile -ExecutionPolicy Bypass -File scripts/mojagg.ps1 test-mojo` for the native tuple and scratch-path smoke tests, and
-`powershell.exe -NoProfile -ExecutionPolicy Bypass -File scripts/mojagg.ps1 test-python` for Python parity against numbagg.
+Mojo is also an emerging language, so implementations like these can be useful beyond this project: they provide a more diverse set of real-world numerical algorithms with which to evaluate the language, its compiler, and its runtime behavior. The results should be interpreted as one practical data point rather than a complete benchmark of Mojo.
 
-## Performance measurement
+---
 
-The repository keeps two separate performance paths. The small
-`benchmarks/codspeed/` suite runs on trusted pushes and pull requests through
-[CodSpeed](https://codspeed.io). It covers representative reduction, groupby,
-matrix, rolling, exponential, and fill paths with moderate deterministic
-inputs, so it can detect regressions without running the publication matrix.
+## Why Mojo?
 
-The manual comparison in `benchmarks/public_benchmark.py` is intended for an
-occasional AWS run. It compares mojagg with numbagg and available pandas
-adapters, records time and peak Python-tracked allocation, verifies results,
-and writes a self-contained HTML dashboard. The default profile is the larger
-`Public` suite; `Quick` is useful while editing the configuration:
+I find Mojo's proposal compelling: a language that remains syntactically close to Python while compiling directly to machine code, featuring first-class SIMD primitives, and offering a unified programming model across different hardware targets (CPUs and GPUs).
 
-```powershell
-powershell.exe -NoProfile -ExecutionPolicy Bypass -File scripts/mojagg.ps1 bench-public --profile quick --only reduction:nansum,nanmean
-```
+Coming from Python, I am not a fan of the steep learning curve and syntax of lower-level alternatives like C++ or Rust. Mojo provides a practical candidate for developing high-performance algorithms without sacrificing time learning an entirely different language paradigm.
 
-On the publication host, the same runner is portable:
+Furthermore, as AI-assisted software engineering continues to advance, having a language that is clean, readable, and consistent across hardware targets makes it easier to migrate existing Python code and write new high-performance kernels from scratch. A readable, expressive language with compiled performance represents an exciting foundation for the future of numerical computing.
 
-```bash
-python benchmarks/public_benchmark.py --profile public --output docs/benchmarks/latest/index.html
-```
+---
 
-For a programmatic run, instantiate `Public`, `Quick`, or `Stress` and mutate
-their public case lists and function lists. Each `ReductionTest`,
-`GroupByTest`, `MatrixTest`, `RollingTest`, `ExponentialTest`, and `FillTest`
-owns its shape, dtype, axes, NaN settings, and family-specific parameters.
-Missing or semantically unsupported adapters are shown as `N/A` in the report.
+## Installation & Quick Start
 
-The default output is `docs/benchmarks/latest/index.html` with a companion
-`results.json`. Once a manual run is complete, commit or upload those files to
-that directory. A later static documentation site can embed the report from
-`latest/index.html` without rerunning the expensive benchmark in CI.
-
-## Maintenance automation
-
-The repository has scheduled maintenance workflows for moving toolchains and
-support policies:
-
-- [`mojo-watch.yml`](.github/workflows/mojo-watch.yml) detects new Modular
-  MAX releases, validates a toolchain update, and opens a draft PR with
-  release-note signals for possible GUFunc and kernel refactors.
-- [`python-support-watch.yml`](.github/workflows/python-support-watch.yml)
-  detects stable CPython releases and NumPy's minimum Python requirement, then
-  opens a draft PR that keeps Pixi, CI, release metadata, and the lockfile in
-  sync.
-- [`pr-review.yml`](.github/workflows/pr-review.yml) reviews pull request
-  diffs for missing parity tests, benchmark evidence, stale lockfiles, hidden
-  copies or casts, and unsafe workflow changes. It does not execute code from
-  fork pull requests.
-
-Dependabot continues to maintain Python dependencies and GitHub Actions.
-
-## Install
+Install `mojagg` via `pip`:
 
 ```bash
 pip install mojagg
 ```
 
-Prebuilt wheels for Linux x86_64/aarch64 and macOS arm64. Python ≥ 3.10, NumPy ≥ 2.0. No Mojo toolchain needed — kernels ship compiled.
+### Requirements
+- Python `>= 3.10`
+- NumPy `>= 2.0`
+- Pre-compiled wheels include all native kernels; no Mojo installation is required for normal use.
 
-## Functions
-
-| Family | Functions |
-|---|---|
-| Aggregations | `nansum nanmean nanstd nanvar nanmin nanmax nancount nanargmin nanargmax nanmedian nanquantile allnan anynan count` |
-| Grouped | `group_nansum group_nanmean group_nanprod group_nanvar group_nanstd group_nancount group_nanmin group_nanmax group_nanargmin group_nanargmax group_nanfirst group_nanlast group_nanany group_nanall group_nansum_of_squares` |
-| Rolling | `move_sum move_mean move_std move_var move_cov move_corr` |
-| Exp-weighted | `move_exp_nansum move_exp_nanmean move_exp_nancount move_exp_nanvar move_exp_nanstd move_exp_nancov move_exp_nancorr` |
-| Matrix | `nancovmatrix nancorrmatrix move_covmatrix move_corrmatrix move_exp_nancovmatrix move_exp_nancorrmatrix` |
-| Fill | `ffill bfill` |
-
-`nanvar` and `nanstd` use numbagg's default `ddof=1` and accept an integer
-`ddof` keyword. `nanquantile`/`nanmedian` use a non-streaming selection path
-with NumPy-compatible linear interpolation; scalar quantiles are returned as
-scalars and vector quantiles occupy the leading axis.
-
-Native reduction kernels instantiate `float64`/`float32`/`int64`/`int32`;
-the facade visibly promotes numbagg-compatible small and integer inputs where
-required. Reduction inputs remain zero-copy, except for documented promotion
-and big-endian normalization.
-Grouped operations expect dense, non-negative factorization labels.
-
-## Configuration
+### Quick Start
 
 ```python
+import numpy as np
+import mojagg
+
+# 1. NaN-aware Reductions
+values = np.array([[1.0, np.nan, 3.0], [4.0, 5.0, np.nan]])
+mojagg.nansum(values, axis=1)
+# array([4., 9.])
+
+# 2. Grouped Aggregations
+labels = np.array([0, 1, 0])
+mojagg.group_nanmean(values[0], labels, axis=0)
+# array([2., nan])
+
+# 3. Moving / Rolling Windows
+mojagg.move_mean(values[0], window=2, min_count=1)
+# array([1., 1., 3.])
+```
+
+Direct calls do not modify `numbagg` or any other library. For integration with downstream packages like `xarray`, see [Compatibility Registration](#compatibility-registration).
+
+---
+
+## Compatibility Registration
+
+`mojagg` can act as a drop-in replacement for `numbagg` in libraries such as [xarray](https://github.com/pydata/xarray). By registering `mojagg`, any module importing or calling `numbagg` will automatically resolve to `mojagg`'s compiled kernels.
+
+### Scoped Patching (Recommended)
+
+Use the `patch()` context manager to temporarily redirect `numbagg` calls within a specific block:
+
+```python
+import mojagg
+import xarray as xr
+
+with mojagg.patch():
+    # Inside this block, xarray and numbagg use compiled mojagg kernels
+    # automatically restored upon exiting
+    pass
+
+assert not mojagg.is_registered()
+```
+
+### Global Registration
+
+For process-wide registration across your entire application or interactive session:
+
+```python
+import mojagg
+
+mojagg.register()
+
+try:
+    # All numbagg calls now dispatch to mojagg
+    pass
+finally:
+    mojagg.unregister()
+```
+
+`is_registered()` returns `True` whenever `mojagg` is actively patching `numbagg`.
+
+---
+
+## Available Operations
+
+All functions match the public signatures and return conventions of `numbagg`. The catalog is organized by operation family:
+
+### Reductions
+`allnan`, `anynan`, `count`, `nanargmax`, `nanargmin`, `nancount`, `nanmax`, `nanmean`, `nanmedian`, `nanmin`, `nanprod`, `nanquantile`, `nanstd`, `nansum`, `nanvar`
+
+### Grouped Aggregations
+`group_nanall`, `group_nanany`, `group_nanargmax`, `group_nanargmin`, `group_nancount`, `group_nanfirst`, `group_nanlast`, `group_nanmax`, `group_nanmean`, `group_nanmin`, `group_nanprod`, `group_nanstd`, `group_nansum`, `group_nansum_of_squares`, `group_nanvar`
+
+### Rolling Windows
+`move_corr`, `move_cov`, `move_mean`, `move_std`, `move_sum`, `move_var`
+
+### Exponentially Weighted Windows
+`move_exp_nancorr`, `move_exp_nancount`, `move_exp_nancov`, `move_exp_nanmean`, `move_exp_nanstd`, `move_exp_nansum`, `move_exp_nanvar`
+
+### Matrix Statistics
+`nancorrmatrix`, `nancovmatrix`, `move_corrmatrix`, `move_covmatrix`, `move_exp_nancorrmatrix`, `move_exp_nancovmatrix`
+
+### Fill Operations
+`bfill`, `ffill`
+
+### Semantics & Contracts
+- **Axes & Broadcasting:** Full support for integer axes, `axis=None`, and generalized broadcasting matching NumPy/numbagg rules.
+- **Degrees of Freedom:** `nanvar` and `nanstd` follow the numbagg default of `ddof=1`.
+- **Grouped Labels:** Grouped operations expect dense, non-negative integer labels.
+- **Quantiles:** `nanquantile` supports both scalar quantiles and vector quantiles (where the quantile dimension appears as the leading axis of the output).
+- **Dtype Preservation:** Matches numbagg's exact return types, including preserving input float types across predicate operations.
+
+---
+
+## Configuration & Tuning
+
+`mojagg` provides flexible thread and threshold configuration via context managers, function calls, or environment variables:
+
+```python
+import mojagg
+
+# Temporary per-call configuration
 with mojagg.config(parallel_threshold=50_000, parallel_min_groups=64, threads=8):
     mojagg.group_nansum(values, labels)
 
-mojagg.set_config(backend="cpu")  # global
-# or env: MOJAGG_PARALLEL_THRESHOLD=50000 MOJAGG_THREADS=8
+# Global runtime configuration
+mojagg.set_config(backend="cpu", threads=4)
+
+# Current thread settings
+cfg = mojagg.get_config()
 ```
 
-Parallel dispatch requires both thresholds: enough outer slices and enough
-elements in each input core. Context manager > global > env var > tuned
-defaults (benchmark-derived).
+### Environment Variables
+- `MOJAGG_PARALLEL_THRESHOLD`: Minimum total elements required to trigger parallel dispatch (default: tuned per kernel).
+- `MOJAGG_THREADS`: Number of worker threads for parallel execution.
+- `MOJAGG_BACKEND`: Execution backend (`cpu`).
 
-## Philosophy
+**Dispatch Rule:** Parallelization requires two thresholds to be met: sufficient outer slices and sufficient elements per input core, preventing multi-threading overhead on small workloads.
 
-1. **Parity before speed.** A result that doesn't match numbagg is a bug, however fast. The test suite *is* the spec.
-2. **No hidden work.** No JIT warmup, no silent casts, no secret copies. If mojagg can't go fast on your data as-is, it tells you.
-3. **Measure or revert.** Performance changes land only with benchmark evidence.
-4. **Design for the next hardware.** Kernels are written against a backend abstraction; GPU targets slot in without API changes.
+---
 
-## Built with AI, built for AI
+## Execution Model & Architecture
 
-mojagg is designed and maintained with AI agents as first-class contributors — and first-class users:
+`mojagg` bridges Python NumPy arrays to compiled Mojo kernels using a generalized universal function (`guvectorize`) architecture:
 
-- **Machine-readable design docs** (`AGENTS.md`, `skills/`) encode the architecture, parity semantics, and performance rules, so agent-generated contributions are consistent by construction.
-- **Self-verifying**: parity tests + benchmark gates give agents (and humans) objective acceptance criteria for every change.
-- **Agent-friendly API**: predictable naming, explicit errors, structured config — easy for codegen tools to call correctly.
+```
+Python Array (NumPy)
+       │
+       ▼
+Python Facade (python/mojagg/)
+  • Shape & dtype validation
+  • Return layout allocation
+       │
+       ▼
+Native Typed Binding (src/mojagg/python/)
+  • Fixed-arity GUTensor descriptors
+  • Symbolic core-dimension resolution
+       │
+       ▼
+guvectorize Driver (src/mojagg/drivers/)
+  • Outer-dimension broadcasting & slicing
+  • Parallel work distribution (DispatchPolicy)
+  • Scratch buffer management for non-contiguous slices
+       │
+       ▼
+Compiled Mojo Kernel (src/mojagg/nanfuncs/, groupby/, moving/)
+  • Explicit SIMD vectorization with masked NaN checks
+  • Contiguous memory pointers with zero bounds checks
+```
 
-Contributions from humans and agents alike are welcome. See `AGENTS.md`.
+For an in-depth explanation of descriptor ownership, core axes, and memory layout, see the [guvectorize Driver Reference](docs/guvectorize.md).
 
-## Personal experience using Mojo
+---
 
-I really liked the syntax and the general idea behind Mojo, but it is still
-hard to develop with it if you come from a Python background. The language has
-several syntax and metaprogramming limitations, especially around trait
-parametrization, variadic generic arguments, tuple manipulation, and
-compile-time type transformations.
+## Benchmark Results & Analysis
 
-The original design of this project was more generic. The operation signature
-would be built once, the binding would inspect it to identify the outputs, and
-the kernel would be able to unpack the signature directly in `__call__`. In
-an ideal version, the same generic code would build the complete execution
-plan, allocate every output, bind the NumPy addresses, and pass the resulting
-signature to the operation without requiring operation-specific helper
-functions.
+Comprehensive benchmarks were executed on dedicated AWS instances across a wide variety of array shapes, dtypes, and memory layouts. The full interactive dashboard is available here:
 
-In practice, Mojo currently makes some of these patterns difficult or
-impossible. Traits cannot express the parameterized variadic interfaces
-needed for arbitrary operation signatures. A generic function can work with a
-tuple when its element pack is explicitly available as `*Args`, but it cannot
-recover that pack from an opaque associated type such as
-`Operation.Signature`. For example, an `empty_signature[Operation]()` function
-can return `Operation.Signature`, but the result cannot be passed to another
-generic function that expects `Tuple[*Args]`, because the compiler cannot
-infer the element pack from the associated type.
+👉 **[View the Complete Benchmark Results](docs/benchmarks/index.html)**
 
-The language also has limited support for generic tuple transformations.
-Filtering the output tensors, constructing a new output-only signature, or
-forwarding an arbitrary tuple through several generic layers is only possible
-when the concrete tuple types have already been exposed to the compiler. This
-forced the project to construct grouped signatures explicitly and to use a
-small number of helpers for the one-output, two-output, and three-output
-cases. Output initialization therefore had to be supplied separately instead
-of being encoded in a fully generic signature schema.
+### Performance Overview
 
-The Python boundary adds another layer of manual work. NumPy arrays cannot be
-converted automatically into the borrowed tensor descriptors used by the
-Mojo driver. The binding must map Mojo dtypes to NumPy dtypes, build the
-planned shape, allocate the arrays, bind their memory addresses, and keep the
-Python owners alive while the native call runs. These operations are possible,
-but the language does not currently provide a simple reflection or ownership
-abstraction that makes this boundary as generic as the original design
-intended.
+The results reveal clear trade-offs across different algorithmic patterns:
 
-AI models also tend to make many mistakes when writing Mojo. This may be
-related to the language being new and having fewer examples available for
-training. Even after using the skills provided for Mojo development, I tried
-multiple models, from Luna to K3 to Astra, and all of them required several
-iterations to verify syntax and compiler behavior. This translated into
-additional token usage and development time.
+- **Where mojagg excels:**
+  - **Large Reductions:** Algorithms like `nanstd`, `nanvar`, and `nansum` on medium-to-large inputs show significant speedups over numbagg thanks to efficient SIMD vectorization and accumulator unrolling.
+  - **Matrix Statistics:** Multi-threaded kernels like `nancovmatrix` and `nancorrmatrix` achieve up to **10x speedups** along with dramatically lower memory consumption.
+  - **Argmin / Argmax:** Kernels like `nanargmax` and `nanargmin` were manually restructured to eliminate redundant NaN comparison checks, outperforming numbagg substantially.
 
-This is not a message saying that Mojo should not be used. It is a message
-that, for many general use cases, the language still lacks important
-functionality, and I would not consider it an ideal language at this point in
-its development. I expect it to improve significantly in the future, and I
-also expect this project to become simpler and more generic as those features
-arrive. The Modular team has already explained that Mojo is still under active
-development and that much of the current effort is focused on AI integration,
-hardware support, and related priorities.
+- **Where performance is comparable:**
+  - **Rolling & Moving Windows:** Moving calculations (`move_mean`, `move_std`, etc.) show very similar performance between Mojo and Numba, serving as an effective direct comparison between the two compilers on identical algorithms.
 
-## License
+- **Where numbagg leads:**
+  - **Axis-0 Early-Exit Predicates:** For operations like `allnan` or `anynan` along `axis=0`, numbagg's loop structure can short-circuit earlier across outer dimensions, whereas mojagg processes through its standardized driver.
+  - **Grouped Reductions with Scattered Labels:** Grouped operations where keys are not contiguous in memory present cache-locality challenges; sorting or indirect scatter operations are currently harder to vectorize effectively with SIMD.
+  - **Multi-Quantile Selection:** `nanquantile` uses a custom multi-quantile partition algorithm. While it consumes up to **3x less peak memory** than numbagg, it is currently slower on certain shapes.
 
-BSD 3-Clause — same as numbagg. mojagg is and will remain 100% free and open source.
+### Layout & Memory Considerations
+To guarantee maximum execution speed without bounds checks or strided branching, mojagg's compiled kernels operate on contiguous memory. When an input core is non-contiguous, the driver allocates a thread-local scratch buffer to stage the contiguous slice. In contrast, Numba handles non-contiguous inputs through strided indexing. Depending on the input memory layout, this architectural choice represents a conscious trade-off between kernel simplicity/SIMD efficiency and scratch allocation.
 
-## Acknowledgments
+---
 
-Inspired by and API-compatible with [numbagg](https://github.com/numbagg/numbagg) (BSD-3). Group-label conventions follow [numpy-groupies](https://github.com/ml31415/numpy-groupies).
+## Pros & Cons
+
+An honest assessment of `mojagg` compared to `numbagg`:
+
+### Advantages
+1. **Instant First Execution:** No JIT warm-up latency. Kernels are pre-compiled and run at full speed on the very first invocation.
+2. **Superior Reduction & Matrix Performance:** Substantially faster on large-scale reductions and multi-threaded covariance/correlation matrix operations.
+3. **Lower Memory Footprint:** More conservative memory usage across quantile and matrix calculations.
+4. **Clean Parallelization:** Straightforward multi-threading via `DispatchPolicy` without unpredictable Numba parallelization heuristics.
+5. **No Compiler Dependencies for Users:** Installs cleanly via `pip` on standard Linux/WSL environments.
+6. **Fast Sorting Routines:** Efficient sorting and partition implementations in Mojo.
+
+### Limitations
+1. **Rank Limit (`MAX_RANK = 8`):** Arrays are currently limited to 8 dimensions (sufficient for >95% of scientific workloads, but less than NumPy's theoretical 64).
+2. **Maintenance Complexity:** Writing generic, type-safe Mojo drivers with manual SIMD intrinsics is more complex than maintaining high-level Numba code.
+3. **Driver Scratch Copies:** Non-contiguous slices along the reduction core require scratch staging.
+4. **Preserved Numbagg Dtype Quirks:** Retains numbagg's convention of returning input dtypes for predicate reductions for 100% compatibility, adding complexity to the Python binding.
+5. **No Native Windows Toolchain Yet:** Mojo compilation is currently Linux-oriented (Windows contributors develop via WSL).
+
+---
+
+## Personal Development Experience
+
+Building `mojagg` provided valuable firsthand experience with Mojo in its current evolutionary stage:
+
+- **Generic Programming & `guvectorize`:** The most challenging part of the project was building a `guvectorize` equivalent, which does not exist out of the box in Mojo. Mojo's support for variadic generic arguments, compile-time tuple manipulation, and shape inference is still maturing. Achieving clean generic dispatch required implementing explicit typed helpers for common signatures.
+- **NumPy Views vs. Contiguous Strides:** Standard scientific Python relies heavily on strided views. Because Mojo's standard buffers favor contiguous memory, bridging the gap required building custom view abstractions (`NDView`) and scratch buffers to avoid unnecessary copies.
+- **SIMD Vectorization:** Mojo's SIMD syntax is intuitive and expressive. Handling register tails cleanly when array lengths are not multiples of the vector register width was the primary implementation detail.
+- **Compiler Maturity & JIT:** While compilation of dozens of specialized kernel variants takes noticeable time, the ability to iterate using the JIT was invaluable during kernel development.
+- **AI-Assisted Development:** Rapid syntax changes across Mojo compiler versions often led AI models to suggest outdated syntax, necessitating strict automated parity tests and compiler verification.
+- **Windows Workflow:** In the absence of a native Windows Mojo compiler, developing a unified PowerShell wrapper (`scripts/mojagg.ps1`) targeting Ubuntu WSL created a seamless local development workflow.
+
+---
+
+## Contributing: Implementing an Operation
+
+Extending `mojagg` with a new operation follows a five-step path:
+
+1. **Python Facade:** Add the public function in `python/mojagg/` with docstrings, argument validation, and return shape planning.
+2. **Native Binding:** Expose the typed binding in `src/mojagg/python/` defining the `GUTensor` input/output contract.
+3. **Mojo Kernel:** Implement the numerical algorithm in `src/mojagg/nanfuncs/`, `groupby/`, or `moving/` utilizing SIMD primitives.
+4. **Parity Tests:** Add test cases under `tests/python/` verifying 100% numerical and exception parity against `numbagg`.
+5. **Benchmark:** Add the function to the benchmark suite (`benchmarks/`) to validate performance across data sizes and layouts.
+
+For detailed rules on memory ownership, core axes, and driver contracts, consult the [guvectorize Driver Reference](docs/guvectorize.md) and [`AGENTS.md`](AGENTS.md).
+
+---
+
+## Local Development (WSL)
+
+Contributors working on Windows use the unified PowerShell wrapper, which transparently executes all commands inside Ubuntu WSL:
+
+```powershell
+# Verify environment and dependencies
+powershell.exe -NoProfile -ExecutionPolicy Bypass -File scripts/mojagg.ps1 doctor
+
+# Build native extension
+powershell.exe -NoProfile -ExecutionPolicy Bypass -File scripts/mojagg.ps1 build
+
+# Run Mojo unit tests
+powershell.exe -NoProfile -ExecutionPolicy Bypass -File scripts/mojagg.ps1 test-mojo
+
+# Run Python parity tests vs numbagg
+powershell.exe -NoProfile -ExecutionPolicy Bypass -File scripts/mojagg.ps1 test-python
+
+# Format and lint
+powershell.exe -NoProfile -ExecutionPolicy Bypass -File scripts/mojagg.ps1 format
+powershell.exe -NoProfile -ExecutionPolicy Bypass -File scripts/mojagg.ps1 lint
+
+# Run local benchmark suite
+powershell.exe -NoProfile -ExecutionPolicy Bypass -File scripts/mojagg.ps1 bench-public --profile quick
+```
+
+---
+
+## Roadmap
+
+Future development directions and exploration areas:
+
+- **Nested Parallelism:** Explore inner-loop parallelization within individual cores while balancing outer-dimension slicing to avoid CPU thread oversubscription.
+- **Simplified Generic Signatures:** Refactor driver and kernel signatures as Mojo's metaprogramming and variadic generic capabilities mature.
+- **Additional Operations:** Implement algorithms not covered by numbagg (such as `rankdata` to remove the runtime dependency on SciPy).
+- **Non-NaN Baseline Kernels:** Explore pure non-NaN kernel variants to evaluate how compiled Mojo kernels compare directly against baseline NumPy implementations.
+- **Kernel Optimization:** Continue optimizing the existing algorithms by testing different SIMD widths and unroll factors, and by evaluating additional SIMD capabilities where they fit the workload.
+
+---
+
+## Maintenance Automation
+
+The repository includes scheduled CI workflows to maintain stability across ecosystem updates:
+- [`mojo-watch.yml`](.github/workflows/mojo-watch.yml): Tracks new Modular MAX releases and drafts toolchain updates.
+- [`python-support-watch.yml`](.github/workflows/python-support-watch.yml): Monitors CPython releases and NumPy compatibility.
+- [`pr-review.yml`](.github/workflows/pr-review.yml): Automated pull request checks for test parity and benchmark evidence.
+
+---
+
+## License & Acknowledgments
+
+- **License:** Released under the [BSD-3-Clause License](LICENSE).
+- **Acknowledgments:** Inspired by and API-compatible with [numbagg](https://github.com/numbagg/numbagg) (BSD-3). Group-label conventions follow [numpy-groupies](https://github.com/ml31415/numpy-groupies).

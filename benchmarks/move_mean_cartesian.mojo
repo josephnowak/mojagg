@@ -49,6 +49,43 @@ def fill_inputs(values_address: Int, length: Int):
             values[unsafe_offset=i] = nan_value()
 
 
+@always_inline
+def sequential_variant(values_address: Int, output_address: Int, length: Int):
+    var values = Pointer[mut=False, Float64, ImmUntrackedOrigin](unsafe_from_address=values_address)
+    var output = Pointer[mut=True, Float64, MutAnyOrigin](unsafe_from_address=output_address)
+    var input_offset = 0
+    var total = Float64(0)
+    var count = Float64(0)
+    var threshold = Float64(MIN_COUNT)
+
+    while input_offset < length:
+        var active = min(1, length - input_offset)
+        if input_offset < WINDOW:
+            active = min(active, WINDOW - input_offset)
+        var entering = SIMD[DType.float64, 1](0)
+        entering[0] = values[unsafe_offset=input_offset]
+        var expiring = SIMD[DType.float64, 1](0)
+        if input_offset >= WINDOW:
+            expiring[0] = values[unsafe_offset=input_offset - WINDOW]
+        var entering_value = entering[0]
+        if isnan(entering_value):
+            entering_value = 0.0
+        else:
+            count += 1.0
+        var expiring_value = expiring[0]
+        if input_offset >= WINDOW:
+            if isnan(expiring_value):
+                expiring_value = 0.0
+            else:
+                count -= 1.0
+        total += entering_value - expiring_value
+        if count >= threshold:
+            output[unsafe_offset=input_offset] = total / count
+        else:
+            output[unsafe_offset=input_offset] = nan_value()
+        input_offset += active
+
+
 def vectorized_variant[width: Int, unroll_factor: Int](
     values_address: Int, output_address: Int, length: Int
 ):
@@ -73,10 +110,11 @@ def vectorized_variant[width: Int, unroll_factor: Int](
                 else:
                     count += 1.0
                 var expiring_value = expiring[lane]
-                if isnan(expiring_value):
-                    expiring_value = 0.0
-                else:
-                    count -= 1.0
+                if i >= WINDOW:
+                    if isnan(expiring_value):
+                        expiring_value = 0.0
+                    else:
+                        count -= 1.0
                 total += entering_value - expiring_value
                 if count >= threshold:
                     output[unsafe_offset=i + lane] = total / count
@@ -117,6 +155,21 @@ def run_variant[width: Int, unroll_factor: Int](
     )
 
 
+def run_sequential(values: Int, output: Int, reference: Int, length: Int):
+    for _ in range(WARMUPS):
+        sequential_variant(values, output, length)
+
+    var started = perf_counter_ns()
+    for _ in range(REPEATS):
+        sequential_variant(values, output, length)
+    var elapsed = perf_counter_ns() - started
+    print(
+        "implementation=old_sequential average_ns=",
+        Float64(elapsed) / Float64(REPEATS),
+        " match=", outputs_match(reference, output, length),
+    )
+
+
 def main() raises:
     comptime length = DATA_BYTES // BYTES_PER_VALUE
     var values_storage = alloc(Layout[Float64](count=length))
@@ -127,8 +180,12 @@ def main() raises:
     var output = Int(output_storage.unsafe_ptr())
 
     fill_inputs(values, length)
-    vectorized_variant[1, 1](values, reference, length)
+    sequential_variant(values, reference, length)
 
+    run_sequential(values, output, reference, length)
+    print("implementation=new_vectorized width=8 unroll=8")
+    run_variant[8, 8](values, output, reference, length)
+    print("implementation=cartesian_variants")
     run_variant[1, 1](values, output, reference, length)
     run_variant[1, 2](values, output, reference, length)
     run_variant[1, 4](values, output, reference, length)
