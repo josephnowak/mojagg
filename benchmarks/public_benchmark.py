@@ -30,7 +30,6 @@ import json
 import math
 import os
 import platform
-import socket
 import statistics
 import sys
 import threading
@@ -1533,76 +1532,6 @@ def _suite_records(
     return records
 
 
-def _metadata_request(
-    url: str,
-    *,
-    method: str = "GET",
-    headers: Mapping[str, str] | None = None,
-) -> str | None:
-    """Read one short metadata value without requiring an AWS dependency."""
-
-    from urllib.error import HTTPError, URLError
-    from urllib.request import Request, urlopen
-
-    request = Request(url, method=method, headers=dict(headers or {}))
-    try:
-        with urlopen(request, timeout=0.20) as response:
-            return response.read().decode("utf-8", errors="replace").strip() or None
-    except (HTTPError, URLError, OSError, TimeoutError, ValueError):
-        return None
-
-
-def _aws_instance_metadata() -> dict[str, str]:
-    """Return EC2 identity fields when IMDSv2 is available.
-
-    The instance metadata service is link-local and has a short timeout, so a
-    normal laptop or a non-EC2 host falls through immediately. The optional
-    ``tags/instance/Name`` endpoint is available only when instance metadata
-    tags have been enabled in EC2.
-    """
-
-    base = "http://169.254.169.254/latest"
-    token = _metadata_request(
-        f"{base}/api/token",
-        method="PUT",
-        headers={"X-aws-ec2-metadata-token-ttl-seconds": "21600"},
-    )
-    result: dict[str, str] = {}
-    if token is not None:
-        headers = {"X-aws-ec2-metadata-token": token}
-        paths = {
-            "instance_id": "meta-data/instance-id",
-            "instance_type": "meta-data/instance-type",
-            "ami_id": "meta-data/ami-id",
-            "hostname": "meta-data/hostname",
-            "local_hostname": "meta-data/local-hostname",
-            "availability_zone": "meta-data/placement/availability-zone",
-            "region": "dynamic/instance-identity/document",
-            "lifecycle": "meta-data/instance-life-cycle",
-            "instance_name": "meta-data/tags/instance/Name",
-        }
-        for key, path in paths.items():
-            value = _metadata_request(f"{base}/{path}", headers=headers)
-            if value is None:
-                continue
-            if key == "region" and value.startswith("{"):
-                try:
-                    value = str(json.loads(value).get("region") or "")
-                except json.JSONDecodeError:
-                    value = ""
-            if value:
-                result[key] = value
-    # These environment variables are useful when a launcher already queried
-    # IMDS or when the benchmark runs inside an AWS wrapper/container.
-    for key, env_name in {
-        "instance_id": "AWS_INSTANCE_ID",
-        "instance_type": "AWS_INSTANCE_TYPE",
-        "region": "AWS_REGION",
-    }.items():
-        result.setdefault(key, os.environ.get(env_name, ""))
-    return {key: value for key, value in result.items() if value}
-
-
 def _read_text_file(path: str) -> str | None:
     try:
         return Path(path).read_text(encoding="utf-8", errors="replace")
@@ -1667,35 +1596,12 @@ def _process_affinity() -> int | None:
 
 
 def _device_profile(device_name: str | None = None) -> dict[str, Any]:
-    aws = _aws_instance_metadata()
-    hostname = aws.get("hostname") or socket.gethostname()
     logical_cores = os.cpu_count()
     affinity_cores = _process_affinity()
     physical_cores = _physical_cpu_count()
     memory_total = _memory_total_bytes()
     override = (device_name or os.environ.get("MOJAGG_BENCHMARK_DEVICE_NAME", "")).strip()
-    if override:
-        identity = override
-    elif aws.get("instance_name"):
-        identity = aws["instance_name"]
-    elif aws.get("instance_type"):
-        identity = aws["instance_type"]
-    else:
-        identity = hostname
-    if aws:
-        provider = (
-            "AWS EC2"
-            if any(aws.get(key) for key in ("instance_id", "instance_type", "ami_id"))
-            else "AWS environment"
-        )
-        identity_parts = [identity]
-        if aws.get("instance_type") and aws["instance_type"] not in identity:
-            identity_parts.append(aws["instance_type"])
-        if aws.get("instance_id"):
-            identity_parts.append(aws["instance_id"])
-        identity = " | ".join(identity_parts)
-    else:
-        provider = "local"
+    identity = override or "benchmark host"
     thread_environment = {
         name: os.environ[name]
         for name in (
@@ -1710,9 +1616,7 @@ def _device_profile(device_name: str | None = None) -> dict[str, Any]:
     }
     return {
         "identity": identity,
-        "provider": provider,
-        "hostname": hostname,
-        "aws": aws or None,
+        "provider": "unspecified",
         "cpu": {
             "model": _cpu_model(),
             "architecture": platform.machine() or "unknown",
@@ -1884,7 +1788,11 @@ def build_report(suite: BenchmarkSuite) -> dict[str, Any]:
         "schema_version": 2,
         "generated_at": datetime.now(timezone.utc).isoformat(),
         "host": {
-            "platform": platform.platform(),
+            "platform": "-".join(
+                value
+                for value in (platform.system(), platform.release(), platform.machine())
+                if value
+            ),
             "processor": platform.processor() or "unknown",
             "python": sys.version.split()[0],
             "numpy": np.__version__,
@@ -3351,7 +3259,7 @@ function wireTableControls(){
 
 function init(){
   const host=REPORT.host||{},device=REPORT.device||{};
-  $('#hero-meta').innerHTML=['suite: '+esc(REPORT.suite.name),'device: '+esc(device.identity||'unknown'),'generated: '+esc(REPORT.generated_at),'host: '+esc(host.platform||'unknown'),'python '+esc(host.python||''),'NumPy '+esc(host.numpy||'')].map(x=>'<span class="pill">'+x+'</span>').join('');
+  $('#hero-meta').innerHTML=['suite: '+esc(REPORT.suite.name),'device: '+esc(device.identity||'unknown'),'generated: '+esc(REPORT.generated_at),'platform: '+esc(host.platform||'unknown'),'python '+esc(host.python||''),'NumPy '+esc(host.numpy||'')].map(x=>'<span class="pill">'+x+'</span>').join('');
   $('#summary').innerHTML=statMarkup();
   $('#top3-container').innerHTML=top3Markup();
   $('#worst3-container').innerHTML=worst3Markup();
@@ -3370,11 +3278,10 @@ function init(){
 function display(value){return value==null||value===''?'<span class="muted">N/A</span>':esc(value)}
 function deviceField(label,value){return'<div class="device-field"><span>'+esc(label)+'</span><strong>'+display(value)+'</strong></div>'}
 function deviceMarkup(){
-  const device=REPORT.device||{},aws=device.aws||{},cpu=device.cpu||{},memory=device.memory||{},os=device.os||{},runtime=device.runtime||{},threads=runtime.thread_environment||{};
+  const device=REPORT.device||{},cpu=device.cpu||{},memory=device.memory||{},os=device.os||{},runtime=device.runtime||{},threads=runtime.thread_environment||{};
   const env=Object.entries(threads).map(([name,value])=>'<span class="env-pill">'+esc(name)+'='+esc(value)+'</span>').join('')||'<span class="muted">No thread variables exported</span>';
   const operatingSystem=[os.system,os.release].filter(Boolean).join(' ')||null;
-  const awsFields=[deviceField('Instance type',aws.instance_type),deviceField('Instance ID',aws.instance_id),deviceField('Region',aws.region),deviceField('Availability zone',aws.availability_zone),deviceField('AMI ID',aws.ami_id),deviceField('EC2 Name tag',aws.instance_name),deviceField('Lifecycle',aws.lifecycle)].join('');
-  return'<section class="device-panel" id="device-profile"><div class="device-head"><div><div class="eyebrow">device profile</div><h2>'+display(device.identity||'Unknown device')+'</h2><p>Captured automatically at benchmark start so this result can be interpreted after the AWS instance is gone.</p></div><span class="pill">'+display(device.provider||'unknown')+'</span></div><div class="device-grid"><div class="device-card"><h3>Identity</h3>'+deviceField('Hostname',device.hostname)+deviceField('Provider',device.provider)+awsFields+'</div><div class="device-card"><h3>Compute and memory</h3>'+deviceField('CPU model',cpu.model)+deviceField('Architecture',cpu.architecture)+deviceField('Logical CPUs',cpu.logical_cores)+deviceField('Physical CPUs',cpu.physical_cores)+deviceField('Affinity CPUs',cpu.affinity_cores)+deviceField('Total memory',fmtBytes(memory.total_bytes))+'</div><div class="device-card"><h3>Runtime</h3>'+deviceField('Operating system',operatingSystem)+deviceField('OS / kernel build',os.version)+deviceField('Python',runtime.python)+deviceField('NumPy',runtime.numpy)+deviceField('Process ID',runtime.pid)+'</div></div><div class="device-card" style="margin-top:12px"><h3>Thread environment</h3><div class="device-env">'+env+'</div><div class="device-note">Thread variables are shown when exported by the runner or numerical libraries; CPU affinity reports the cores available to this process.</div></div><details class="device-raw"><summary>Show raw device profile JSON</summary><pre class="raw-json">'+esc(JSON.stringify(device,null,2))+'</pre></details></section>';
+  return'<section class="device-panel" id="device-profile"><div class="device-head"><div><div class="eyebrow">device profile</div><h2>'+display(device.identity||'Unknown device')+'</h2><p>Captured automatically at benchmark start using non-identifying runtime characteristics.</p></div></div><div class="device-grid"><div class="device-card"><h3>Compute and memory</h3>'+deviceField('CPU model',cpu.model)+deviceField('Architecture',cpu.architecture)+deviceField('Logical CPUs',cpu.logical_cores)+deviceField('Physical CPUs',cpu.physical_cores)+deviceField('Affinity CPUs',cpu.affinity_cores)+deviceField('Total memory',fmtBytes(memory.total_bytes))+'</div><div class="device-card"><h3>Runtime</h3>'+deviceField('Operating system',operatingSystem)+deviceField('OS / kernel build',os.version)+deviceField('Python',runtime.python)+deviceField('NumPy',runtime.numpy)+deviceField('Process ID',runtime.pid)+'</div></div><div class="device-card" style="margin-top:12px"><h3>Thread environment</h3><div class="device-env">'+env+'</div><div class="device-note">Thread variables are shown when exported by the runner or numerical libraries; CPU affinity reports the cores available to this process.</div></div></section>';
 }
 
 function threadingMarkup(){
@@ -3470,7 +3377,7 @@ def main(argv: Sequence[str] | None = None) -> int:
     parser.add_argument("--json-output", type=Path)
     parser.add_argument(
         "--device-name",
-        help="human-readable device label; defaults to the EC2 Name tag or detected host identity",
+        help="human-readable device label; defaults to a generic benchmark host label",
     )
     parser.add_argument(
         "--only",

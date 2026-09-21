@@ -68,6 +68,8 @@ Commands:
                 Benchmark the allnan width/unroll Cartesian product.
   bench-move-mean-cartesian
                 Benchmark the move_mean width/unroll Cartesian product.
+  bench-tail-split-3gib
+                Compare masked and split-tail mean loops on 3 GiB of input.
   bench-move-exp-nansum-cartesian
                 Benchmark the move_exp_nansum width/unroll Cartesian product.
   bench-nancovmatrix-cartesian
@@ -108,6 +110,7 @@ $aliases = @{
     "bench-nansum-cartesian" = "bench-nansum-cartesian"
     "bench-allnan-cartesian" = "bench-allnan-cartesian"
     "bench-move-mean-cartesian" = "bench-move-mean-cartesian"
+    "bench-tail-split-3gib" = "bench-tail-split-3gib"
     "bench-move-exp-nansum-cartesian" = "bench-move-exp-nansum-cartesian"
     "bench-nancovmatrix-cartesian" = "bench-nancovmatrix-cartesian"
     "clean-native" = "clean-native"
@@ -416,6 +419,14 @@ run_pixi mojo run benchmarks/allnan_cartesian.mojo "\$@"
 ensure_pixi
 "\$PIXI" install --locked
 run_pixi mojo run benchmarks/move_mean_cartesian.mojo "\$@"
+'@
+        break
+    }
+    "bench-tail-split-3gib" {
+        @'
+ensure_pixi
+"\$PIXI" install --locked
+run_pixi mojo run benchmarks/tail_split_3gib.mojo "\$@"
 '@
         break
     }
