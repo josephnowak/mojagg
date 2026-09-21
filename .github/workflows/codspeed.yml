@@ -8,11 +8,16 @@ on:
 
 permissions:
   contents: read
+  id-token: write # OpenID Connect authentication with CodSpeed
+
+concurrency:
+  group: codspeed-${{ github.ref }}
+  cancel-in-progress: true
 
 jobs:
   benchmarks:
-    # Fork pull requests cannot read the repository token. They are covered by
-    # the normal CI tests; trusted branches run the actual CodSpeed recorder.
+    # Fork pull requests cannot obtain the OIDC token. They are covered by the
+    # normal CI tests; trusted branches run the actual CodSpeed recorder.
     if: github.event_name != 'pull_request' || github.event.pull_request.head.repo.full_name == github.repository
     runs-on: ubuntu-latest
     steps:
@@ -30,5 +35,4 @@ jobs:
         uses: CodSpeedHQ/action@v5
         with:
           mode: simulation
-          token: ${{ secrets.CODSPEED_TOKEN }}
           run: pixi run pytest benchmarks/codspeed --codspeed -q
