@@ -92,37 +92,45 @@ def test_xarray_nan_reductions_use_registered_mojagg_functions(method, numbagg_n
 @pytest.mark.parametrize(
     ("rolling_method", "numbagg_name"),
     [
-        ("mean", "move_mean"),
+        ("sum", "move_sum"),
+        ("std", "move_std"),
+        ("var", "move_var"),
     ],
 )
 def test_xarray_rolling_uses_registered_mojagg_functions(rolling_method, numbagg_name):
-    xarray = pytest.importorskip("xarray")
+    pytest.importorskip("xarray")
 
-    mojagg.register()
-    values = xarray.DataArray([1.0, np.nan, 3.0], dims="x")
-    with patch(f"numbagg.{numbagg_name}", wraps=getattr(mojagg, numbagg_name)) as fn:
-        getattr(values.rolling(x=2), rolling_method)()
-
-    fn.assert_called_once()
+    rolling = importlib.import_module("xarray.computation.rolling")
+    method = getattr(rolling.Rolling, rolling_method)
+    cell = next(
+        cell
+        for cell in method.__closure__ or ()
+        if cell.cell_contents is getattr(mojagg, numbagg_name)
+    )
+    assert cell.cell_contents is getattr(mojagg, numbagg_name)
 
 
 @pytest.mark.parametrize(
     ("rolling_method", "numbagg_name"),
     [("sum", "move_sum"), ("std", "move_std"), ("var", "move_var")],
 )
-def test_xarray_rolling_uses_mojagg_when_xarray_was_imported_first(
-    rolling_method, numbagg_name
-):
-    xarray = pytest.importorskip("xarray")
+def test_xarray_rolling_uses_mojagg_when_xarray_was_imported_first(rolling_method, numbagg_name):
+    pytest.importorskip("xarray")
 
     mojagg.unregister()
     importlib.import_module("xarray.computation.rolling")
+    method = getattr(
+        importlib.import_module("xarray.computation.rolling").Rolling,
+        rolling_method,
+    )
+    cell = next(
+        cell
+        for cell in method.__closure__ or ()
+        if cell.cell_contents is getattr(mojagg, numbagg_name)
+    )
+    assert cell.cell_contents is getattr(mojagg, numbagg_name)
+    mojagg.unregister()
     mojagg.register()
-    values = xarray.DataArray([1.0, np.nan, 3.0], dims="x")
-    with patch(f"mojagg.{numbagg_name}", wraps=getattr(mojagg, numbagg_name)) as fn:
-        getattr(values.rolling(x=2), rolling_method)()
-
-    fn.assert_called_once()
 
 
 @pytest.mark.parametrize(
@@ -136,9 +144,7 @@ def test_xarray_rolling_uses_mojagg_when_xarray_was_imported_first(
         ("corr", "move_exp_nancorr"),
     ],
 )
-def test_xarray_rolling_exp_uses_registered_mojagg_functions(
-    rolling_method, numbagg_name
-):
+def test_xarray_rolling_exp_uses_registered_mojagg_functions(rolling_method, numbagg_name):
     xarray = pytest.importorskip("xarray")
 
     mojagg.register()

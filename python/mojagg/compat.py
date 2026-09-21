@@ -115,11 +115,6 @@ _MODULE_NAMES = {
 # numbagg.nansum.
 _XARRAY_NANOPS_DIRECT = ("nansum",)
 _XARRAY_ROLLING_FUNCS = {
-    "argmax": "move_argmax",
-    "argmin": "move_argmin",
-    "max": "move_max",
-    "min": "move_min",
-    "prod": "move_prod",
     "sum": "move_sum",
     "std": "move_std",
     "var": "move_var",
