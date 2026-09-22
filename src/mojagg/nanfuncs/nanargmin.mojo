@@ -1,6 +1,5 @@
 """NaN-aware first-occurrence argmin and argmax operations."""
 
-from std.algorithm import vectorize
 from std.collections import Span
 from std.sys.info import simd_width_of
 
