@@ -55,6 +55,7 @@ pip install mojagg
 - Python `>= 3.10`
 - NumPy `>= 2.0`
 - Pre-compiled wheels include all native kernels; no Mojo installation is required for normal use.
+- Binary wheels are currently available for Linux and Apple Silicon macOS. Windows users should install and run `mojagg` inside Ubuntu WSL.
 
 ### Quick Start
 
