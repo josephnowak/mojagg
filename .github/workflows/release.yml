@@ -77,7 +77,7 @@ jobs:
           fi
 
       - name: Set up pixi
-        uses: prefix-dev/setup-pixi@v0.10.2
+        uses: prefix-dev/setup-pixi@v0.11.0
         with:
           cache: true
           environments: ${{ matrix.environment }}
@@ -119,7 +119,7 @@ jobs:
           sed -i -E "s/^version = \".*\"/version = \"${{ needs.prepare.outputs.version }}\"/" pyproject.toml
 
       - name: Set up pixi
-        uses: prefix-dev/setup-pixi@v0.10.2
+        uses: prefix-dev/setup-pixi@v0.11.0
         with:
           cache: true
 
