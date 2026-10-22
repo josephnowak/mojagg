@@ -96,42 +96,27 @@ def _move_cov_pair_full_final[
 ):
     """Finalize a full window with the static matrix reduction order."""
 
-    comptime width = 1
     var source_ptr = source.unsafe_ptr()
-    var count_lanes = SIMD[DType.float64, width](0.0)
-    var sum_i_lanes = SIMD[DType.float64, width](0.0)
-    var sum_j_lanes = SIMD[DType.float64, width](0.0)
-    var product_lanes = SIMD[DType.float64, width](0.0)
-    var offset = 0
+    var count = Float64(0.0)
+    var sum_i = Float64(0.0)
+    var sum_j = Float64(0.0)
+    var product_sum = Float64(0.0)
+    for offset in range(n_obs):
+        var value_i = source_ptr[unsafe_offset=offset * n_vars + i]
+        var value_j = source_ptr[unsafe_offset=offset * n_vars + j]
+        if not isnan(value_i) and not isnan(value_j):
+            var shifted_i = Float64(value_i) - shift_i
+            var shifted_j = Float64(value_j) - shift_j
+            count += 1.0
+            sum_i += shifted_i
+            sum_j += shifted_j
+            product_sum += shifted_i * shifted_j
 
-    while offset < n_obs:
-        var active = min(width, n_obs - offset)
-        comptime for lane in range(width):
-            if lane < active:
-                var value_i = source_ptr[
-                    unsafe_offset=(offset + lane) * n_vars + i
-                ]
-                var value_j = source_ptr[
-                    unsafe_offset=(offset + lane) * n_vars + j
-                ]
-                if not isnan(value_i) and not isnan(value_j):
-                    var shifted_i = Float64(value_i) - shift_i
-                    var shifted_j = Float64(value_j) - shift_j
-                    count_lanes[lane] += 1.0
-                    sum_i_lanes[lane] += shifted_i
-                    sum_j_lanes[lane] += shifted_j
-                    product_lanes[lane] += shifted_i * shifted_j
-        offset += active
-
-    var count = count_lanes.reduce_add()
     var required = Float64(min_count)
     if required < 1.0:
         required = 1.0
     var nan_value = nan_or_zero[dtype]()
     if count >= required and count > 1.0:
-        var sum_i = sum_i_lanes.reduce_add()
-        var sum_j = sum_j_lanes.reduce_add()
-        var product_sum = product_lanes.reduce_add()
         var mean_i = sum_i / count
         var mean_j = sum_j / count
         var covariance = (
@@ -176,48 +161,31 @@ def _move_corr_pair_full_final[
 ):
     """Finalize a full window with the static matrix reduction order."""
 
-    comptime width = 1
     var source_ptr = source.unsafe_ptr()
-    var count_lanes = SIMD[DType.float64, width](0.0)
-    var sum_i_lanes = SIMD[DType.float64, width](0.0)
-    var sum_j_lanes = SIMD[DType.float64, width](0.0)
-    var sum_i2_lanes = SIMD[DType.float64, width](0.0)
-    var sum_j2_lanes = SIMD[DType.float64, width](0.0)
-    var product_lanes = SIMD[DType.float64, width](0.0)
-    var offset = 0
+    var count = Float64(0.0)
+    var sum_i = Float64(0.0)
+    var sum_j = Float64(0.0)
+    var sum_i2 = Float64(0.0)
+    var sum_j2 = Float64(0.0)
+    var product_sum = Float64(0.0)
+    for offset in range(n_obs):
+        var value_i = source_ptr[unsafe_offset=offset * n_vars + i]
+        var value_j = source_ptr[unsafe_offset=offset * n_vars + j]
+        if not isnan(value_i) and not isnan(value_j):
+            var shifted_i = Float64(value_i) - shift_i
+            var shifted_j = Float64(value_j) - shift_j
+            count += 1.0
+            sum_i += shifted_i
+            sum_j += shifted_j
+            sum_i2 += shifted_i * shifted_i
+            sum_j2 += shifted_j * shifted_j
+            product_sum += shifted_i * shifted_j
 
-    while offset < n_obs:
-        var active = min(width, n_obs - offset)
-        comptime for lane in range(width):
-            if lane < active:
-                var value_i = source_ptr[
-                    unsafe_offset=(offset + lane) * n_vars + i
-                ]
-                var value_j = source_ptr[
-                    unsafe_offset=(offset + lane) * n_vars + j
-                ]
-                if not isnan(value_i) and not isnan(value_j):
-                    var shifted_i = Float64(value_i) - shift_i
-                    var shifted_j = Float64(value_j) - shift_j
-                    count_lanes[lane] += 1.0
-                    sum_i_lanes[lane] += shifted_i
-                    sum_j_lanes[lane] += shifted_j
-                    sum_i2_lanes[lane] += shifted_i * shifted_i
-                    sum_j2_lanes[lane] += shifted_j * shifted_j
-                    product_lanes[lane] += shifted_i * shifted_j
-        offset += active
-
-    var count = count_lanes.reduce_add()
     var required = Float64(min_count)
     if required < 2.0:
         required = 2.0
     var nan_value = nan_or_zero[dtype]()
     if count >= required:
-        var sum_i = sum_i_lanes.reduce_add()
-        var sum_j = sum_j_lanes.reduce_add()
-        var sum_i2 = sum_i2_lanes.reduce_add()
-        var sum_j2 = sum_j2_lanes.reduce_add()
-        var product_sum = product_lanes.reduce_add()
         var mean_i = sum_i / count
         var mean_j = sum_j / count
         var variance_i = sum_i2 / count - mean_i * mean_i

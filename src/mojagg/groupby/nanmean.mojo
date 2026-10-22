@@ -44,19 +44,14 @@ struct GroupNanMean[
         value: Scalar[Self.value_t],
     ):
         var label = Int(label_value)
+        var clean_value = value
+        var valid_count = Scalar[Self.label_t](1)
         comptime if Self.value_t.is_floating_point():
-            var value_block = SIMD[Self.value_t, 1](value)
-            comptime zero_block = SIMD[Self.value_t, 1](0)
-            var mask = isnan(value_block)
-            var clean_value = mask.select(zero_block, value_block)[0]
-            var valid_count = mask.select(
-                SIMD[Self.label_t, 1](0), SIMD[Self.label_t, 1](1)
-            )[0]
-            destination[unsafe_offset=label] += clean_value
-            counts[unsafe_offset=label] += valid_count
-        else:
-            destination[unsafe_offset=label] += value
-            counts[unsafe_offset=label] += Scalar[Self.label_t](1)
+            if isnan(value):
+                clean_value = 0
+                valid_count = 0
+        destination[unsafe_offset=label] += clean_value
+        counts[unsafe_offset=label] += valid_count
 
     @always_inline
     def __call__(mut self, tensors: Self.Signature):

@@ -40,14 +40,15 @@ struct GroupNanMinMax[
     ):
         var label = Int(label_value)
         var current = destination[unsafe_offset=label]
-        var should_update: SIMD[DType.bool, 1]
+        var should_update: Bool
         comptime if Self.is_max:
             should_update = value >= current
         else:
             should_update = value <= current
 
-        should_update |= isnan(current)
-        destination[unsafe_offset=label] = should_update.select(value, current)
+        should_update = should_update or isnan(current)
+        if should_update:
+            destination[unsafe_offset=label] = value
 
     @always_inline
     def __call__(mut self, tensors: Self.Signature):

@@ -1,8 +1,7 @@
 """NaN-aware trailing moving variance and standard deviation."""
 
 from std.collections import Span
-from std.math import sqrt
-from std.sys.info import simd_width_of
+from std.math import isnan, sqrt
 
 from mojagg.core.numeric import nan_or_zero
 from mojagg.drivers.guvectorize import (
@@ -10,10 +9,6 @@ from mojagg.drivers.guvectorize import (
     Dim,
     GUTensor,
     GUFuncKernel,
-)
-from mojagg.moving.moving_helpers import (
-    load_expiring_block,
-    load_masked_block,
 )
 
 
@@ -26,53 +21,45 @@ def _move_var_sequential[
     window: Int,
     min_count: Int,
 ):
-    """Compute sample variance statistics with SIMD block deltas."""
+    """Compute sample variance statistics with a scalar rolling recurrence."""
 
-    comptime width = 1
     var n = len(values)
-    var input_offset = 0
     var total = Scalar[dtype](0)
     var sum_of_squares = Scalar[dtype](0)
     var count = Scalar[dtype](0)
     var threshold = Scalar[dtype](min_count)
     if threshold < 2.0:
         threshold = 2.0
+    var source_ptr = values.unsafe_ptr()
     var destination_ptr = destination.unsafe_ptr()
-    while input_offset < n:
-        var active = min(width, n - input_offset)
-        if input_offset < window:
-            active = min(active, window - input_offset)
-        var entering = load_masked_block[dtype, width](
-            values, input_offset, active
-        )
-        var expiring = load_expiring_block[dtype, width](
-            values, input_offset, window, active
-        )
-        var delta_total = entering.values - expiring.values
-        var delta_squares = entering.squares() - expiring.squares()
-        var delta_count = entering.counts - expiring.counts
-        comptime for lane in range(width):
-            if lane < active:
-                total += delta_total[lane]
-                sum_of_squares += delta_squares[lane]
-                count += delta_count[lane]
-                if count >= threshold:
-                    var variance = (sum_of_squares - total * total / count) / (
-                        count - 1.0
-                    )
-                    comptime if take_sqrt:
-                        destination_ptr[
-                            unsafe_offset=input_offset + lane
-                        ] = sqrt(variance)
-                    else:
-                        destination_ptr[
-                            unsafe_offset=input_offset + lane
-                        ] = variance
-                else:
-                    destination_ptr[
-                        unsafe_offset=input_offset + lane
-                    ] = nan_or_zero[dtype]()
-        input_offset += active
+    for i in range(n):
+        var entering = source_ptr[unsafe_offset=i]
+        var delta_total = Scalar[dtype](0)
+        var delta_squares = Scalar[dtype](0)
+        var delta_count = Scalar[dtype](0)
+        if not isnan(entering):
+            delta_total = entering
+            delta_squares = entering * entering
+            delta_count = 1
+        if i >= window:
+            var expiring = source_ptr[unsafe_offset=i - window]
+            if not isnan(expiring):
+                delta_total -= expiring
+                delta_squares -= expiring * expiring
+                delta_count -= 1
+        total += delta_total
+        sum_of_squares += delta_squares
+        count += delta_count
+        if count >= threshold:
+            var variance = (sum_of_squares - total * total / count) / (
+                count - 1.0
+            )
+            comptime if take_sqrt:
+                destination_ptr[unsafe_offset=i] = sqrt(variance)
+            else:
+                destination_ptr[unsafe_offset=i] = variance
+        else:
+            destination_ptr[unsafe_offset=i] = nan_or_zero[dtype]()
 
 
 struct MoveVarKernel[

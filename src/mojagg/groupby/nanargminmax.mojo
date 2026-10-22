@@ -66,20 +66,16 @@ struct GroupNanArgMinMax[
     ):
         var label = Int(label_value)
         var current = best_values[unsafe_offset=label]
-        var pos = destination[unsafe_offset=label]
 
-        var should_update: SIMD[DType.bool, 1]
+        var should_update: Bool
         comptime if Self.is_max:
             should_update = value >= current
         else:
             should_update = value <= current
 
-        destination[unsafe_offset=label] = should_update.select(
-            Scalar[Self.value_t](flat_index), pos
-        )[0]
-        best_values[unsafe_offset=label] = should_update.select(value, current)[
-            0
-        ]
+        if should_update:
+            destination[unsafe_offset=label] = Scalar[Self.value_t](flat_index)
+            best_values[unsafe_offset=label] = value
 
     @always_inline
     def __call__(mut self, tensors: Self.Signature):

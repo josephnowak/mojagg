@@ -39,19 +39,14 @@ struct GroupNanSum[
         value: Scalar[Self.value_t],
     ):
         var label = Int(label_value)
-        var powered_value: Scalar[Self.value_t]
+        var clean_value = value
         comptime if Self.value_t.is_floating_point():
-            var value_block = SIMD[Self.value_t, 1](value)
-            var clean_value = isnan(value_block).select(
-                SIMD[Self.value_t, 1](0), value_block
-            )[0]
-            powered_value = clean_value
-        else:
-            powered_value = value
+            if isnan(value):
+                clean_value = 0
         comptime if Self.power == 1:
-            destination[unsafe_offset=label] += powered_value
+            destination[unsafe_offset=label] += clean_value
         else:
-            destination[unsafe_offset=label] += pow(powered_value, Self.power)
+            destination[unsafe_offset=label] += pow(clean_value, Self.power)
 
     @always_inline
     def __call__(mut self, tensors: Self.Signature):

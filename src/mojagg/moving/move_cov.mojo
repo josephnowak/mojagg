@@ -1,7 +1,7 @@
 """NaN-aware trailing moving covariance."""
 
 from std.collections import Span
-from std.sys.info import simd_width_of
+from std.math import isnan
 
 from mojagg.core.numeric import nan_or_zero
 from mojagg.drivers.guvectorize import (
@@ -9,10 +9,6 @@ from mojagg.drivers.guvectorize import (
     Dim,
     GUTensor,
     GUFuncKernel,
-)
-from mojagg.moving.moving_helpers import (
-    load_expiring_pair,
-    load_masked_pair,
 )
 
 
@@ -26,11 +22,9 @@ def _move_cov_sequential[
     window: Int,
     min_count: Int,
 ):
-    """Compute pairwise sample covariance with SIMD block deltas."""
+    """Compute pairwise sample covariance with a scalar rolling recurrence."""
 
-    comptime width = 1
     var n = len(a_values)
-    var input_offset = 0
     var a_sum = Scalar[dtype](0)
     var b_sum = Scalar[dtype](0)
     var product_sum = Scalar[dtype](0)
@@ -38,43 +32,40 @@ def _move_cov_sequential[
     var threshold = Scalar[dtype](min_count)
     if threshold < 2.0:
         threshold = 2.0
+    var a_ptr = a_values.unsafe_ptr()
+    var b_ptr = b_values.unsafe_ptr()
     var destination_ptr = destination.unsafe_ptr()
-    while input_offset < n:
-        var active = min(width, n - input_offset)
-        if input_offset < window:
-            active = min(active, window - input_offset)
-        var entering_a, entering_b = load_masked_pair[dtype, width](
-            a_values, b_values, input_offset, active
-        )
-        var expiring_a, expiring_b = load_expiring_pair[dtype, width](
-            a_values, b_values, input_offset, window, active
-        )
-        var delta_a = entering_a.values - expiring_a.values
-        var delta_b = entering_b.values - expiring_b.values
-        var delta_products = entering_a.products(
-            entering_b
-        ) - expiring_a.products(expiring_b)
-        var delta_count = entering_a.counts - expiring_a.counts
-
-        comptime for lane in range(width):
-            if lane < active:
-                a_sum += delta_a[lane]
-                b_sum += delta_b[lane]
-                product_sum += delta_products[lane]
-                count += delta_count[lane]
-                if count >= threshold:
-                    var covariance = (product_sum - a_sum * b_sum / count) / (
-                        count - 1.0
-                    )
-                    destination_ptr[
-                        unsafe_offset=input_offset + lane
-                    ] = covariance
-                else:
-                    destination_ptr[
-                        unsafe_offset=input_offset + lane
-                    ] = nan_or_zero[dtype]()
-
-        input_offset += active
+    for i in range(n):
+        var entering_a = a_ptr[unsafe_offset=i]
+        var entering_b = b_ptr[unsafe_offset=i]
+        var delta_a = Scalar[dtype](0)
+        var delta_b = Scalar[dtype](0)
+        var delta_product = Scalar[dtype](0)
+        var delta_count = Scalar[dtype](0)
+        if not (isnan(entering_a) or isnan(entering_b)):
+            delta_a = entering_a
+            delta_b = entering_b
+            delta_product = entering_a * entering_b
+            delta_count = 1
+        if i >= window:
+            var expiring_a = a_ptr[unsafe_offset=i - window]
+            var expiring_b = b_ptr[unsafe_offset=i - window]
+            if not (isnan(expiring_a) or isnan(expiring_b)):
+                delta_a -= expiring_a
+                delta_b -= expiring_b
+                delta_product -= expiring_a * expiring_b
+                delta_count -= 1
+        a_sum += delta_a
+        b_sum += delta_b
+        product_sum += delta_product
+        count += delta_count
+        if count >= threshold:
+            var covariance = (product_sum - a_sum * b_sum / count) / (
+                count - 1.0
+            )
+            destination_ptr[unsafe_offset=i] = covariance
+        else:
+            destination_ptr[unsafe_offset=i] = nan_or_zero[dtype]()
 
 
 struct MoveCovKernel[dtype: DType](GUFuncKernel, ImplicitlyCopyable):

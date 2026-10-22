@@ -55,18 +55,12 @@ struct GroupNanVarStd[
         value: Scalar[Self.value_t],
     ):
         var label = Int(label_value)
-        var clean_value: Scalar[Self.value_t]
-        var count: Scalar[Self.label_t]
+        var clean_value = value
+        var count = Scalar[Self.label_t](1)
         comptime if Self.value_t.is_floating_point():
-            var value_block = SIMD[Self.value_t, 1](value)
-            var mask = isnan(value_block)
-            clean_value = mask.select(SIMD[Self.value_t, 1](0), value_block)[0]
-            count = mask.select(
-                SIMD[Self.label_t, 1](0), SIMD[Self.label_t, 1](1)
-            )[0]
-        else:
-            clean_value = value
-            count = Scalar[Self.label_t](1)
+            if isnan(value):
+                clean_value = 0
+                count = 0
         sums[unsafe_offset=label] += clean_value
         sums_of_squares[unsafe_offset=label] += clean_value * clean_value
         counts[unsafe_offset=label] += count

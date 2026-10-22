@@ -36,10 +36,8 @@ struct GroupNanAnyAll[
         var label = Int(label_value)
         var truth: Bool
         comptime if Self.value_t.is_floating_point():
-            var value_block = SIMD[Self.value_t, 1](value)
-            var zero_block = SIMD[Self.value_t, 1](0)
-            var is_nan = isnan(value_block)[0]
-            var is_nonzero = value_block != zero_block
+            var is_nan = isnan(value)
+            var is_nonzero = value != 0
             truth = (
                 is_nan
                 or is_nonzero if Self.is_all else not is_nan
@@ -48,18 +46,12 @@ struct GroupNanAnyAll[
         else:
             truth = value != Scalar[Self.value_t](0)
         # `all` clears the group on a falsy lane, `any` sets it on a truthy one.
-        var truth_block = SIMD[DType.bool, 1](truth)
-        var destination_block = SIMD[Self.value_t, 1](
-            destination[unsafe_offset=label]
-        )
         comptime if Self.is_all:
-            destination[unsafe_offset=label] = truth_block.select(
-                destination_block, SIMD[Self.value_t, 1](0)
-            )[0]
+            if not truth:
+                destination[unsafe_offset=label] = 0
         else:
-            destination[unsafe_offset=label] = truth_block.select(
-                SIMD[Self.value_t, 1](1), destination_block
-            )[0]
+            if truth:
+                destination[unsafe_offset=label] = 1
 
     @always_inline
     def __call__(mut self, tensors: Self.Signature):
