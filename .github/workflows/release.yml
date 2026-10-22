@@ -106,8 +106,39 @@ jobs:
           name: wheels-${{ matrix.os }}-${{ matrix.environment }}
           path: dist/repaired/*.whl
 
+  sdist:
+    needs: prepare
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v7
+        with:
+          ref: ${{ github.event_name == 'release' && github.event.release.tag_name || format('v{0}', needs.prepare.outputs.version) }}
+
+      # Clean first so no stale compiled extensions from a local build leak into the sdist.
+      - name: Build sdist from a clean tree
+        run: |
+          git clean -xdf
+          sed -i -E "s/^version = \".*\"/version = \"${{ needs.prepare.outputs.version }}\"/" pyproject.toml
+          python -m pip install --quiet build twine
+          python -m build --sdist --outdir dist
+
+      - name: Check sdist
+        run: |
+          python -m twine check dist/*.tar.gz
+          tar -tzf dist/*.tar.gz > contents.txt
+          if grep -Eq '\.(so|pyd|dylib)$' contents.txt; then
+            echo "❌ compiled binary found in sdist"; exit 1
+          fi
+          grep -q '/src/mojagg/.*\.mojo$' contents.txt \
+            || { echo "❌ Mojo sources missing from sdist"; exit 1; }
+
+      - uses: actions/upload-artifact@v7
+        with:
+          name: sdist
+          path: dist/*.tar.gz
+
   publish:
-    needs: [build, prepare]
+    needs: [build, sdist, prepare]
     runs-on: ubuntu-latest
     environment: pypi
     steps:
@@ -117,13 +148,13 @@ jobs:
           path: dist
           merge-multiple: true
 
-      - name: Publish wheels to PyPI (Trusted Publishing OIDC)
+      - name: Publish to PyPI (Trusted Publishing OIDC)
         if: env.PYPI_TOKEN == ''
         uses: pypa/gh-action-pypi-publish@release/v1
         env:
           PYPI_TOKEN: ${{ secrets.PYPI_API_TOKEN }}
 
-      - name: Publish wheels to PyPI (API Token)
+      - name: Publish to PyPI (API Token)
         if: env.PYPI_TOKEN != ''
         uses: pypa/gh-action-pypi-publish@release/v1
         env:
