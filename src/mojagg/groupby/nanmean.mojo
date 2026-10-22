@@ -1,10 +1,10 @@
 """Grouped NaN-aware mean over aligned value and label cores."""
 
-from std.algorithm import vectorize
 from std.math import isnan
 from std.sys.info import simd_width_of
 
-from mojagg.core.numeric import load_block_or_identity, nan_or_zero
+from mojagg.core.numeric import nan_or_zero
+from mojagg.core.vectorize import vectorize_no_evl
 from mojagg.core.preallocated import Preallocated
 from mojagg.groupby.group_kernel import GroupKernel
 from mojagg.drivers.guvectorize import (
@@ -44,19 +44,14 @@ struct GroupNanMean[
         value: Scalar[Self.value_t],
     ):
         var label = Int(label_value)
+        var clean_value = value
+        var valid_count = Scalar[Self.label_t](1)
         comptime if Self.value_t.is_floating_point():
-            var value_block = SIMD[Self.value_t, 1](value)
-            comptime zero_block = SIMD[Self.value_t, 1](0)
-            var mask = isnan(value_block)
-            var clean_value = mask.select(zero_block, value_block)[0]
-            var valid_count = mask.select(
-                SIMD[Self.label_t, 1](0), SIMD[Self.label_t, 1](1)
-            )[0]
-            destination[unsafe_offset=label] += clean_value
-            counts[unsafe_offset=label] += valid_count
-        else:
-            destination[unsafe_offset=label] += value
-            counts[unsafe_offset=label] += Scalar[Self.label_t](1)
+            if isnan(value):
+                clean_value = 0
+                valid_count = 0
+        destination[unsafe_offset=label] += clean_value
+        counts[unsafe_offset=label] += valid_count
 
     @always_inline
     def __call__(mut self, tensors: Self.Signature):
@@ -75,19 +70,15 @@ struct GroupNanMean[
 
         def step[
             vector_width: Int
-        ](i: Int, evl: Int) {
+        ](i: Int, _evl: Int) {
             imm value_ptr,
             imm label_ptr,
             imm destination_ptr,
             imm count_ptr,
         }:
-            var value_block = load_block_or_identity[Self.value_t, width](
-                value_ptr, i, evl, Scalar[Self.value_t](0)
-            )
-            var label_block = load_block_or_identity[Self.label_t, width](
-                label_ptr, i, evl, Scalar[Self.label_t](-1)
-            )
-            comptime for lane in range(width):
+            var value_block = value_ptr.unsafe_load[width=vector_width](i)
+            var label_block = label_ptr.unsafe_load[width=vector_width](i)
+            comptime for lane in range(vector_width):
                 var label = label_block[lane]
                 if label < 0:
                     continue
@@ -98,37 +89,23 @@ struct GroupNanMean[
                     value_block[lane],
                 )
 
-        vectorize[width, unroll_factor=8](len(values), step)
-
-        comptime width_finalize = simd_width_of[Self.value_t]()
-        comptime nan_block = SIMD[Self.value_t, width_finalize](
-            nan_or_zero[Self.value_t]()
-        )
-        comptime zero_block = SIMD[Self.label_t, width_finalize](0)
+        vectorize_no_evl[width, unroll_factor=8](len(values), step)
 
         def finalize[
             vector_width: Int
-        ](i: Int, evl: Int,) {imm destination_ptr, imm count_ptr}:
-            var value_block = load_block_or_identity[
-                Self.value_t, width_finalize
-            ](destination_ptr, i, evl, Scalar[Self.value_t](0))
-            var count_block = load_block_or_identity[
-                Self.label_t, width_finalize
-            ](count_ptr, i, evl, Scalar[Self.label_t](0))
+        ](i: Int, _evl: Int) {imm destination_ptr, imm count_ptr}:
+            var value_block = destination_ptr.unsafe_load[width=vector_width](i)
+            var count_block = count_ptr.unsafe_load[width=vector_width](i)
+            var zero_block = SIMD[Self.label_t, vector_width](0)
             var empty = count_block.eq(zero_block)
             var count_values = count_block.cast[Self.value_t]()
             var mean_block = value_block / count_values
-            mean_block = empty.select(nan_block, mean_block)
+            mean_block = empty.select(
+                SIMD[Self.value_t, vector_width](nan_or_zero[Self.value_t]()),
+                mean_block,
+            )
+            destination_ptr.unsafe_store[width=vector_width](i, mean_block)
 
-            if evl == width_finalize:
-                destination_ptr.unsafe_store[width=width_finalize](
-                    i, mean_block
-                )
-            else:
-                comptime for lane in range(width_finalize):
-                    if lane < evl:
-                        destination_ptr[unsafe_offset=i + lane] = mean_block[
-                            lane
-                        ]
-
-        vectorize[width_finalize, unroll_factor=8](len(destination), finalize)
+        vectorize_no_evl[simd_width_of[Self.value_t](), unroll_factor=8](
+            len(destination), finalize
+        )

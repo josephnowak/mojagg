@@ -1,10 +1,10 @@
 """Grouped NaN-aware variance and standard deviation kernels."""
 
-from std.algorithm import vectorize
 from std.math import isnan, sqrt
 from std.sys.info import simd_width_of
 
-from mojagg.core.numeric import load_block_or_identity, nan_or_zero
+from mojagg.core.numeric import nan_or_zero
+from mojagg.core.vectorize import vectorize_no_evl
 from mojagg.core.preallocated import Preallocated
 from mojagg.groupby.group_kernel import GroupKernel
 from mojagg.drivers.guvectorize import (
@@ -55,18 +55,12 @@ struct GroupNanVarStd[
         value: Scalar[Self.value_t],
     ):
         var label = Int(label_value)
-        var clean_value: Scalar[Self.value_t]
-        var count: Scalar[Self.label_t]
+        var clean_value = value
+        var count = Scalar[Self.label_t](1)
         comptime if Self.value_t.is_floating_point():
-            var value_block = SIMD[Self.value_t, 1](value)
-            var mask = isnan(value_block)
-            clean_value = mask.select(SIMD[Self.value_t, 1](0), value_block)[0]
-            count = mask.select(
-                SIMD[Self.label_t, 1](0), SIMD[Self.label_t, 1](1)
-            )[0]
-        else:
-            clean_value = value
-            count = Scalar[Self.label_t](1)
+            if isnan(value):
+                clean_value = 0
+                count = 0
         sums[unsafe_offset=label] += clean_value
         sums_of_squares[unsafe_offset=label] += clean_value * clean_value
         counts[unsafe_offset=label] += count
@@ -96,20 +90,16 @@ struct GroupNanVarStd[
 
         def step[
             vector_width: Int
-        ](i: Int, evl: Int) {
+        ](i: Int, _evl: Int) {
             imm value_ptr,
             imm label_ptr,
             imm sums_ptr,
             imm squares_ptr,
             imm count_ptr,
         }:
-            var value_block = load_block_or_identity[Self.value_t, width](
-                value_ptr, i, evl, Scalar[Self.value_t](0)
-            )
-            var label_block = load_block_or_identity[Self.label_t, width](
-                label_ptr, i, evl, Scalar[Self.label_t](-1)
-            )
-            comptime for lane in range(width):
+            var value_block = value_ptr.unsafe_load[width=vector_width](i)
+            var label_block = label_ptr.unsafe_load[width=vector_width](i)
+            comptime for lane in range(vector_width):
                 var label = label_block[lane]
                 if label < 0:
                     continue
@@ -121,45 +111,37 @@ struct GroupNanVarStd[
                     value_block[lane],
                 )
 
-        vectorize[width, unroll_factor=8](len(values), step)
+        vectorize_no_evl[width, unroll_factor=8](len(values), step)
 
         def finalize[
             vector_width: Int
-        ](
-            i: Int,
-            evl: Int,
-        ) {
+        ](i: Int, _evl: Int) {
             imm destination_ptr,
             imm sums_ptr,
             imm squares_ptr,
             imm count_ptr,
             imm ddof,
         }:
-            var sum_block = load_block_or_identity[
-                Self.value_t, width_finalize
-            ](sums_ptr, i, evl, Scalar[Self.value_t](0))
-            var squares_block = load_block_or_identity[
-                Self.value_t, width_finalize
-            ](squares_ptr, i, evl, Scalar[Self.value_t](0))
-            var count_block = load_block_or_identity[
-                Self.label_t, width_finalize
-            ](count_ptr, i, evl, Scalar[Self.label_t](0))
-            comptime for lane in range(width_finalize):
-                if lane < evl:
-                    var count = Int(count_block[lane])
-                    if count <= ddof:
-                        destination_ptr[unsafe_offset=i + lane] = nan_or_zero[
-                            Self.value_t
-                        ]()
-                    else:
-                        var count_value = Scalar[Self.value_t](count)
-                        var denominator = Scalar[Self.value_t](count - ddof)
-                        var variance = (
-                            squares_block[lane]
-                            - sum_block[lane] * sum_block[lane] / count_value
-                        ) / denominator
-                        comptime if Self.is_std:
-                            variance = sqrt(variance)
-                        destination_ptr[unsafe_offset=i + lane] = variance
+            var sum_block = sums_ptr.unsafe_load[width=vector_width](i)
+            var squares_block = squares_ptr.unsafe_load[width=vector_width](i)
+            var count_block = count_ptr.unsafe_load[width=vector_width](i)
+            comptime for lane in range(vector_width):
+                var count = Int(count_block[lane])
+                if count <= ddof:
+                    destination_ptr[unsafe_offset=i + lane] = nan_or_zero[
+                        Self.value_t
+                    ]()
+                else:
+                    var count_value = Scalar[Self.value_t](count)
+                    var denominator = Scalar[Self.value_t](count - ddof)
+                    var variance = (
+                        squares_block[lane]
+                        - sum_block[lane] * sum_block[lane] / count_value
+                    ) / denominator
+                    comptime if Self.is_std:
+                        variance = sqrt(variance)
+                    destination_ptr[unsafe_offset=i + lane] = variance
 
-        vectorize[width_finalize, unroll_factor=1](len(destination), finalize)
+        vectorize_no_evl[width_finalize, unroll_factor=1](
+            len(destination), finalize
+        )

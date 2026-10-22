@@ -143,4 +143,12 @@ del _module
 if nanfuncs is None or groupby is None or moving is None:  # pragma: no cover
 
     def __getattr__(name: str):
-        raise ImportError("mojagg native extension not built. Run `pixi run build-ext`.")
+        if sys.platform == "win32":
+            raise ImportError(
+                "mojagg has no native Windows wheel. Install it inside Linux, macOS, "
+                "or Ubuntu WSL, where PyPI provides the compiled wheel."
+            )
+        raise ImportError(
+            "mojagg native extension is unavailable. Install a supported binary wheel "
+            "or build it with `pixi run build-ext`."
+        )

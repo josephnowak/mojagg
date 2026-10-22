@@ -41,46 +41,6 @@ struct FillKernel[
         self.limit = limit
 
     @always_inline
-    @staticmethod
-    def _chunk_start(n: Int, width: Int) -> Int:
-        comptime if Self.backward:
-            return n - width
-        else:
-            return 0
-
-    @always_inline
-    @staticmethod
-    def _chunk_step(width: Int) -> Int:
-        comptime if Self.backward:
-            return -width
-        else:
-            return width
-
-    @always_inline
-    @staticmethod
-    def _chunk_valid(offset: Int, n: Int, width: Int) -> Bool:
-        comptime if Self.backward:
-            return offset >= 0
-        else:
-            return offset + width <= n
-
-    @always_inline
-    @staticmethod
-    def _tail_start(offset: Int, width: Int) -> Int:
-        comptime if Self.backward:
-            return offset + width - 1
-        else:
-            return offset
-
-    @always_inline
-    @staticmethod
-    def _tail_step() -> Int:
-        comptime if Self.backward:
-            return -1
-        else:
-            return 1
-
-    @always_inline
     def _apply_step(
         self,
         value: Scalar[Self.dtype],
@@ -117,57 +77,32 @@ struct FillKernel[
             )
             return
 
-        comptime width = 4
         var current = nan_or_zero[Self.dtype]()
         var allowed = self.limit if self.limit >= 0 else n
         var remaining = allowed
         var src_ptr = source.unsafe_ptr()
         var dest_ptr = destination.unsafe_ptr()
 
-        # -----------------------------------------------------------------
-        # 1. Unified SIMD Chunk Loop
-        # -----------------------------------------------------------------
-        var offset = Self._chunk_start(n, width)
-        var chunk_step = Self._chunk_step(width)
-
-        while Self._chunk_valid(offset, n, width):
-            var block = src_ptr.unsafe_load[width=width](offset)
-
-            comptime if Self.backward:
-                comptime for i in range(width):
-                    comptime lane = width - 1 - i
-                    block[lane] = self._apply_step(
-                        block[lane],
-                        current,
-                        remaining,
-                        allowed,
-                    )
-            else:
-                comptime for i in range(width):
-                    block[i] = self._apply_step(
-                        block[i],
-                        current,
-                        remaining,
-                        allowed,
-                    )
-            dest_ptr.unsafe_store[width=width](offset, block)
-
-            offset += chunk_step
-
-        # -----------------------------------------------------------------
-        # 2. Unified Scalar Tail Loop
-        # -----------------------------------------------------------------
-        var tail_i = Self._tail_start(offset, width)
-        var tail_step = Self._tail_step()
-
-        while tail_i >= 0 and tail_i < n:
-            dest_ptr[unsafe_offset=tail_i] = self._apply_step(
-                src_ptr[unsafe_offset=tail_i],
-                current,
-                remaining,
-                allowed,
-            )
-            tail_i += tail_step
+        # The recurrence is serial, so a plain scalar loop lets the compiler
+        # keep the state in registers without SIMD lane shuffles.
+        comptime if Self.backward:
+            var i = n - 1
+            while i >= 0:
+                dest_ptr[unsafe_offset=i] = self._apply_step(
+                    src_ptr[unsafe_offset=i],
+                    current,
+                    remaining,
+                    allowed,
+                )
+                i -= 1
+        else:
+            for i in range(n):
+                dest_ptr[unsafe_offset=i] = self._apply_step(
+                    src_ptr[unsafe_offset=i],
+                    current,
+                    remaining,
+                    allowed,
+                )
 
 
 comptime FFill[dtype: DType] = FillKernel[dtype, False]

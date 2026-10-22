@@ -1,10 +1,9 @@
 """Grouped NaN-aware boolean reductions."""
 
-from std.algorithm import vectorize
 from std.math import isnan
 from std.sys.info import simd_width_of
 
-from mojagg.core.numeric import load_block_or_identity
+from mojagg.core.vectorize import vectorize_no_evl
 from mojagg.drivers.guvectorize import (
     CoreSpec,
     Dim,
@@ -37,10 +36,8 @@ struct GroupNanAnyAll[
         var label = Int(label_value)
         var truth: Bool
         comptime if Self.value_t.is_floating_point():
-            var value_block = SIMD[Self.value_t, 1](value)
-            var zero_block = SIMD[Self.value_t, 1](0)
-            var is_nan = isnan(value_block)[0]
-            var is_nonzero = value_block != zero_block
+            var is_nan = isnan(value)
+            var is_nonzero = value != 0
             truth = (
                 is_nan
                 or is_nonzero if Self.is_all else not is_nan
@@ -49,18 +46,12 @@ struct GroupNanAnyAll[
         else:
             truth = value != Scalar[Self.value_t](0)
         # `all` clears the group on a falsy lane, `any` sets it on a truthy one.
-        var truth_block = SIMD[DType.bool, 1](truth)
-        var destination_block = SIMD[Self.value_t, 1](
-            destination[unsafe_offset=label]
-        )
         comptime if Self.is_all:
-            destination[unsafe_offset=label] = truth_block.select(
-                destination_block, SIMD[Self.value_t, 1](0)
-            )[0]
+            if not truth:
+                destination[unsafe_offset=label] = 0
         else:
-            destination[unsafe_offset=label] = truth_block.select(
-                SIMD[Self.value_t, 1](1), destination_block
-            )[0]
+            if truth:
+                destination[unsafe_offset=label] = 1
 
     @always_inline
     def __call__(mut self, tensors: Self.Signature):
@@ -76,18 +67,14 @@ struct GroupNanAnyAll[
 
         def step[
             vector_width: Int
-        ](i: Int, evl: Int) {
+        ](i: Int, _evl: Int) {
             imm value_ptr,
             imm label_ptr,
             imm destination_ptr,
         }:
-            var value_block = load_block_or_identity[Self.value_t, width](
-                value_ptr, i, evl, Scalar[Self.value_t](0)
-            )
-            var label_block = load_block_or_identity[Self.label_t, width](
-                label_ptr, i, evl, Scalar[Self.label_t](-1)
-            )
-            comptime for lane in range(width):
+            var value_block = value_ptr.unsafe_load[width=vector_width](i)
+            var label_block = label_ptr.unsafe_load[width=vector_width](i)
+            comptime for lane in range(vector_width):
                 var label = label_block[lane]
                 if label < 0:
                     continue
@@ -97,4 +84,4 @@ struct GroupNanAnyAll[
                     value_block[lane],
                 )
 
-        vectorize[width, unroll_factor=8](len(values), step)
+        vectorize_no_evl[width, unroll_factor=8](len(values), step)

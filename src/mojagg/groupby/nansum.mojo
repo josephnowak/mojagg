@@ -5,11 +5,10 @@ for each outer slice.  The operation only performs the grouped scatter for
 that slice; labels and values are expected to be aligned and equally long.
 """
 
-from std.algorithm import vectorize
 from std.math import isnan, pow
 from std.sys.info import simd_width_of
 
-from mojagg.core.numeric import load_block_or_identity
+from mojagg.core.vectorize import vectorize_no_evl
 from mojagg.drivers.guvectorize import (
     CoreSpec,
     Dim,
@@ -40,19 +39,14 @@ struct GroupNanSum[
         value: Scalar[Self.value_t],
     ):
         var label = Int(label_value)
-        var powered_value: Scalar[Self.value_t]
+        var clean_value = value
         comptime if Self.value_t.is_floating_point():
-            var value_block = SIMD[Self.value_t, 1](value)
-            var clean_value = isnan(value_block).select(
-                SIMD[Self.value_t, 1](0), value_block
-            )[0]
-            powered_value = clean_value
-        else:
-            powered_value = value
+            if isnan(value):
+                clean_value = 0
         comptime if Self.power == 1:
-            destination[unsafe_offset=label] += powered_value
+            destination[unsafe_offset=label] += clean_value
         else:
-            destination[unsafe_offset=label] += pow(powered_value, Self.power)
+            destination[unsafe_offset=label] += pow(clean_value, Self.power)
 
     @always_inline
     def __call__(mut self, tensors: Self.Signature):
@@ -71,18 +65,14 @@ struct GroupNanSum[
 
         def step[
             vector_width: Int
-        ](i: Int, evl: Int) {
+        ](i: Int, _evl: Int) {
             imm value_ptr,
             imm label_ptr,
             imm destination_ptr,
         }:
-            var value_block = load_block_or_identity[Self.value_t, width](
-                value_ptr, i, evl, Scalar[Self.value_t](0)
-            )
-            var label_block = load_block_or_identity[Self.label_t, width](
-                label_ptr, i, evl, Scalar[Self.label_t](-1)
-            )
-            comptime for lane in range(width):
+            var value_block = value_ptr.unsafe_load[width=vector_width](i)
+            var label_block = label_ptr.unsafe_load[width=vector_width](i)
+            comptime for lane in range(vector_width):
                 var label = label_block[lane]
                 if label < 0:
                     continue
@@ -92,4 +82,4 @@ struct GroupNanSum[
                     value_block[lane],
                 )
 
-        vectorize[width, unroll_factor=8](len(values), step)
+        vectorize_no_evl[width, unroll_factor=8](len(values), step)

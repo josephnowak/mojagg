@@ -37,7 +37,7 @@ You can cut a release in either of two ways:
 3. Fill in the release title (e.g. `v0.1.0`) and click **Generate release notes**.
 4. Click **Publish release**.
 
-The `release.yml` workflow will automatically trigger, build the wheels and sdist, test them, publish to PyPI, and attach the assets to the GitHub Release.
+The `release.yml` workflow will automatically trigger, build and smoke-test the supported platform wheels and the source distribution (sdist), publish them to PyPI, and attach the assets to the GitHub Release.
 
 ### Option B: The "Run workflow" button
 1. Go to **Actions → Release → Run workflow**.
@@ -46,10 +46,21 @@ The `release.yml` workflow will automatically trigger, build the wheels and sdis
 The workflow will:
 - validate the version and refuse if the tag exists,
 - bump `pyproject.toml`, commit, and tag `v<version>`,
-- build wheel (`manylinux_x86_64`) + sdist,
+- build supported platform wheels (`manylinux_x86_64`, macOS arm64, and Linux arm64),
+- build an sdist from a clean checkout and check it with `twine check`,
 - smoke-test the built wheel,
-- publish to **PyPI** via trusted publishing,
+- publish wheels and the sdist to **PyPI** via trusted publishing,
 - create a GitHub Release with the wheels attached and auto-generated notes.
+
+## About the sdist
+
+The sdist (`mojagg-<version>.tar.gz`) ships the Python sources, the Mojo
+sources under `src/`, the build scripts, and tests, but no compiled
+extensions. It is the source of record for packagers and for
+auditing what a release contains. Building from it requires the Mojo
+toolchain (`pixi run build-wheel`), so `pip install` from the sdist only works
+where a matching wheel is unavailable and Mojo is installed. Users on the
+supported platforms should get a wheel.
 
 ## Versioning
 

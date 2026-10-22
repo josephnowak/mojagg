@@ -20,6 +20,7 @@ from mojagg.drivers.guvectorize import (
     guvectorize,
 )
 from mojagg.core.numeric import nan_or_zero
+from mojagg.core.vectorize import vectorize_no_evl
 from mojagg.moving.move_sum import MoveSumKernel
 from mojagg.nanfuncs.nansum import NanSum
 
@@ -711,6 +712,30 @@ def test_parallel_dispatch_requires_outer_and_inner_thresholds() raises:
     run_parallel_threshold_case(500_001, 4)
 
 
+def test_vectorize_no_evl() raises:
+    comptime width = 4
+    var length = 10
+    var storage = alloc(Layout[Int](count=length))
+    var values = storage.unsafe_ptr()
+    for i in range(length):
+        values[unsafe_offset=i] = -1
+
+    def write_block[vector_width: Int](i: Int, evl: Int) {mut values}:
+        for lane in range(vector_width):
+            values[unsafe_offset=i + lane] = vector_width
+
+    vectorize_no_evl[width](length, write_block)
+
+    var all_ok = True
+    for i in range(0, 8):
+        if values[unsafe_offset=i] != width:
+            all_ok = False
+    if values[unsafe_offset=8] != 1 or values[unsafe_offset=9] != 1:
+        all_ok = False
+    dealloc(storage^)
+    assert_equal(all_ok, True)
+
+
 def main() raises:
     test_guvectorize_nansum()
     test_guvectorize_nansum_power()
@@ -719,3 +744,4 @@ def main() raises:
     test_rejects_noncontiguous_writable_core()
     test_three_dimensional_outer_iterations()
     test_parallel_dispatch_requires_outer_and_inner_thresholds()
+    test_vectorize_no_evl()
