@@ -21,7 +21,7 @@ bench-codspeed = "pytest benchmarks/codspeed -q --codspeed"
 
 [dependencies]
 mojo = ">=1.1.0,<2"
-max = ">=26.6.0,<27"
+max = ">=26.7.0,<27"
 python = ">=3.10"
 pip = ">=25"
 setuptools = ">=69"
